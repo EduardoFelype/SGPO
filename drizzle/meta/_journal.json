@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1786773969023,
+      "tag": "0000_spotty_doctor_octopus",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1786774082833,
+      "tag": "0001_glamorous_harrier",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1786776055499,
+      "tag": "0002_blushing_living_mummy",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1786778189598,
+      "tag": "0003_mysterious_metal_master",
+      "breakpoints": true
+    }
+  ]
+}

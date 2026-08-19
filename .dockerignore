@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.env
+.env.*
+!.env.example
+uploads
+NOTES*.md
+todo.md
+SGPO-*.zip
