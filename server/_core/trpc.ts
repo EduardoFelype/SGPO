@@ -5,6 +5,18 @@ import type { TrpcContext } from "./context";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
+  /**
+   * Erros de validação (Zod) viram uma mensagem legível em português,
+   * em vez do JSON técnico com todas as falhas.
+   */
+  errorFormatter({ shape, error }) {
+    const cause = error.cause as { issues?: { message: string }[] } | undefined;
+    if (error.code === "BAD_REQUEST" && Array.isArray(cause?.issues) && cause.issues.length > 0) {
+      const messages = Array.from(new Set(cause.issues.map((i) => i.message)));
+      return { ...shape, message: messages.slice(0, 3).join(" · ") };
+    }
+    return shape;
+  },
 });
 
 export const router = t.router;

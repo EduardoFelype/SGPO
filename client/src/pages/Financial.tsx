@@ -1,6 +1,6 @@
 import DashboardLayout from "@/components/DashboardLayout";
 import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
-import { EmptyState, ErrorState, LoadingCard, PageHeader, StatusBadge } from "@/components/sgpo";
+import { EmptyState, ErrorState, LoadingCard, PageHeader, StatCard, StatusBadge } from "@/components/sgpo";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -44,15 +44,19 @@ import {
 } from "recharts";
 import { formatBRL, formatDate, FIN_STATUS_LABEL, PAYMENT_METHOD_LABEL } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
+import { chartDate, chartMoney, chartTheme } from "@/lib/chartTheme";
+import { CharCounter, FieldError, MoneyInput } from "@/components/FormFields";
+import { SearchSelect } from "@/components/SearchSelect";
+import { LIMITS } from "@shared/limits";
 import {
   Banknote,
   CalendarX2,
   CheckCircle2,
   CircleDollarSign,
+  Edit2,
   Loader2,
-  Minus,
-  Plus,
   Search,
+  Trash2,
   TrendingUp,
   Wallet,
 } from "lucide-react";
@@ -63,7 +67,8 @@ type TransactionForm = {
   description: string;
   category: string;
   type: "receita" | "despesa";
-  amount: string;
+  /** Valor em centavos */
+  amount: number;
   dueDate: string;
   status: "pendente" | "pago" | "cancelado";
   paymentMethod:
@@ -78,12 +83,22 @@ type TransactionForm = {
   notes: string;
 };
 
+function toDateInput(ts: number) {
+  const d = new Date(ts);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+const DEFAULT_CATEGORIES = [
+  "Aluguel", "Água", "Energia", "Internet/Telefone", "Fornecedores", "Peças", "Salários",
+  "Impostos", "Ferramentas", "Manutenção", "Serviços de oficina", "Outros",
+];
+
 const emptyForm: TransactionForm = {
   description: "",
   category: "",
   type: "receita",
-  amount: "",
-  dueDate: new Date().toISOString().slice(0, 10),
+  amount: 0,
+  dueDate: toDateInput(Date.now()),
   status: "pendente",
   paymentMethod: "",
   notes: "",
@@ -122,6 +137,9 @@ export default function Financial() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<TransactionForm>(emptyForm);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const yearMs = 365 * 24 * 60 * 60 * 1000;
+  const minDue = toDateInput(Date.now() - LIMITS.financialYearsRange * yearMs + 24 * 60 * 60 * 1000);
+  const maxDue = toDateInput(Date.now() + LIMITS.financialYearsRange * yearMs - 24 * 60 * 60 * 1000);
 
   const queryInput = useMemo(
     () => ({
@@ -145,6 +163,20 @@ export default function Financial() {
   );
 
   const { data, isLoading, isError } = trpc.financial.list.useQuery(queryInput);
+  const isFiltered = Boolean(search || status || tab !== "todos");
+  /** Sem nenhum lançamento e sem filtro: o botão de criar fica só no aviso central. */
+  const isFirstUse = !isLoading && !isError && !isFiltered && (data?.total ?? 0) === 0;
+  const clearFilters = () => {
+    setSearch("");
+    setSearchInput("");
+    setStatus("");
+    setTab("todos");
+  };
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>(DEFAULT_CATEGORIES);
+    (data?.rows ?? []).forEach((t) => t.category && set.add(t.category));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [data]);
 
   const invalidate = () => utils.financial.list.invalidate();
 
@@ -228,8 +260,8 @@ export default function Financial() {
       description: t.description,
       category: t.category ?? "",
       type: t.type,
-      amount: String(t.amount / 100),
-      dueDate: new Date(t.dueAt).toISOString().slice(0, 10),
+      amount: t.amount,
+      dueDate: toDateInput(t.dueAt),
       status: t.status === "atrasado" ? "pendente" : t.status,
       paymentMethod: (t.paymentMethod ?? "") as TransactionForm["paymentMethod"],
       notes: t.notes ?? "",
@@ -240,10 +272,11 @@ export default function Financial() {
 
   function validate() {
     const errors: Record<string, string> = {};
-    if (!form.description.trim()) errors.description = "Informe a descrição";
-    if (!form.amount || Number(form.amount) <= 0)
-      errors.amount = "Informe um valor válido (em R$)";
+    if (form.description.trim().length < 2) errors.description = "Informe a descrição (mín. 2 caracteres)";
+    if (form.amount <= 0) errors.amount = "Informe um valor maior que zero";
     if (!form.dueDate) errors.dueDate = "Informe a data de vencimento";
+    else if (form.dueDate < minDue || form.dueDate > maxDue)
+      errors.dueDate = `Vencimento deve estar entre ${minDue.split("-").reverse().join("/")} e ${maxDue.split("-").reverse().join("/")}`;
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   }
@@ -254,7 +287,7 @@ export default function Financial() {
       description: form.description.trim(),
       category: form.category.trim() || null,
       type: form.type,
-      amount: Math.round(Number(form.amount) * 100),
+      amount: form.amount,
       dueAt: new Date(`${form.dueDate}T12:00:00`).getTime(),
       status: form.status,
       paymentMethod: form.paymentMethod || null,
@@ -270,10 +303,16 @@ export default function Financial() {
     if (!data || data.rows.length === 0)
       return (
         <EmptyState
-          title="Nenhum lançamento encontrado"
-          description="Registre receitas e despesas para acompanhar o fluxo de caixa da oficina."
-          action={openCreate}
+          title={isFiltered ? "Nenhum lançamento encontrado" : "Nenhum lançamento ainda"}
+          description={
+            isFiltered
+              ? "Nenhum lançamento corresponde à busca ou aos filtros escolhidos."
+              : "Registre receitas e despesas para acompanhar o fluxo de caixa da oficina."
+          }
+          action={isFiltered ? undefined : openCreate}
           actionLabel="Novo lançamento"
+          secondaryAction={isFiltered ? clearFilters : undefined}
+          secondaryLabel="Limpar filtros"
           icon={<Wallet className="h-6 w-6" />}
         />
       );
@@ -285,10 +324,10 @@ export default function Financial() {
             <TableRow>
               <TableHead>Tipo</TableHead>
               <TableHead>Descrição</TableHead>
-              <TableHead>Categoria</TableHead>
+              <TableHead className="hidden xl:table-cell">Categoria</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Vencimento</TableHead>
-              <TableHead>Pagamento</TableHead>
+              <TableHead className="hidden xl:table-cell">Pagamento</TableHead>
               <TableHead className="text-right">Valor</TableHead>
               <TableHead className="text-right">Ações</TableHead>
             </TableRow>
@@ -318,22 +357,22 @@ export default function Financial() {
                       </p>
                     )}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="hidden xl:table-cell text-muted-foreground text-sm">
                     {t.category ?? "—"}
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={overdue ? "atrasado" : t.status} kind="fin" />
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
                     {formatDate(t.dueAt)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="hidden xl:table-cell text-muted-foreground text-sm">
                     {t.paymentMethod
                       ? PAYMENT_METHOD_LABEL[t.paymentMethod]
                       : "—"}
                   </TableCell>
                   <TableCell
-                    className={`text-right font-semibold ${
+                    className={`text-right font-semibold tabular-nums whitespace-nowrap ${
                       t.type === "receita" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"
                     }`}
                   >
@@ -344,26 +383,45 @@ export default function Financial() {
                       {t.status === "pendente" && (
                         <Button
                           variant="ghost"
-                          size="sm"
-                          className="text-emerald-600 dark:text-emerald-400"
+                          size="icon"
+                          className="h-8 w-8 text-emerald-600 dark:text-emerald-400"
                           title="Marcar como pago"
+                          aria-label="Marcar como pago"
                           onClick={() => markPaidMutation.mutate({ id: t.id })}
                         >
-                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <CheckCircle2 className="h-4 w-4" />
                         </Button>
                       )}
-                      <Button variant="ghost" size="sm" onClick={() => openEdit(t.id)}>
-                        Editar
-                      </Button>
-                      {t.sourceType !== "ordem_servico" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-destructive"
-                          onClick={() => setDeleteTarget({ id: t.id, description: t.description })}
+                      {t.sourceType === "ordem_servico" ? (
+                        <span
+                          className="text-[11px] text-muted-foreground px-2"
+                          title="Gerado pela OS — altere reabrindo ou cancelando a OS"
                         >
-                          <Minus className="h-3.5 w-3.5" />
-                        </Button>
+                          via OS
+                        </span>
+                      ) : (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title="Editar lançamento"
+                            aria-label="Editar lançamento"
+                            onClick={() => openEdit(t.id)}
+                          >
+                            <Edit2 className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive hover:text-destructive"
+                            title="Excluir lançamento"
+                            aria-label="Excluir lançamento"
+                            onClick={() => setDeleteTarget({ id: t.id, description: t.description })}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </>
                       )}
                     </div>
                   </TableCell>
@@ -381,12 +439,36 @@ export default function Financial() {
       <PageHeader
         title="Financeiro"
         subtitle={`${data?.total ?? ""} ${data?.total === 1 ? "lançamento" : "lançamentos"}`}
-        action
+        action={!isFirstUse}
         actionLabel="Novo lançamento"
         onAction={openCreate}
       />
 
-      <Card className="mb-4 shadow-soft">
+      <div className="grid gap-4 sm:grid-cols-3 mb-4">
+        <StatCard
+          label="A receber"
+          value={formatBRL(totals.receivable)}
+          hint="receitas pendentes"
+          icon={<CircleDollarSign className="h-4 w-4" />}
+          tone="success"
+        />
+        <StatCard
+          label="A pagar"
+          value={formatBRL(totals.payable)}
+          hint="despesas pendentes"
+          icon={<Banknote className="h-4 w-4" />}
+          tone="muted"
+        />
+        <StatCard
+          label="Vencidos"
+          value={<span className={totals.overdue > 0 ? "text-destructive" : undefined}>{formatBRL(totals.overdue)}</span>}
+          hint={totals.overdue > 0 ? "precisam de atenção" : "nada vencido"}
+          icon={<CalendarX2 className="h-4 w-4" />}
+          tone="flame"
+        />
+      </div>
+
+      <Card className="mb-6 shadow-soft">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-display flex items-center gap-2">
             <TrendingUp className="h-4 w-4 text-navy" /> Fluxo de caixa (últimos 30 dias)
@@ -394,7 +476,7 @@ export default function Financial() {
         </CardHeader>
         <CardContent>
           {cashFlow && cashFlow.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
+            <ResponsiveContainer width="100%" height={220}>
               <AreaChart
                 data={cashFlow}
                 margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
@@ -409,17 +491,20 @@ export default function Financial() {
                     <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" vertical={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} vertical={false} />
                 <XAxis
                   dataKey="date"
-                  tick={{ fontSize: 11 }}
-                  tickFormatter={(v: string) => v.slice(0, 5)}
-                  stroke="#94a3b8"
+                  tick={chartTheme.axis}
+                  tickFormatter={chartDate}
+                  tickLine={false}
+                  axisLine={false}
+                  minTickGap={16}
                 />
                 <YAxis
-                  tick={{ fontSize: 11 }}
-                  tickFormatter={(v: number) => `R$ ${Math.round(v / 100)}`}
-                  stroke="#94a3b8"
+                  tick={chartTheme.axis}
+                  tickFormatter={chartMoney}
+                  tickLine={false}
+                  axisLine={false}
                   width={72}
                 />
                 <Tooltip
@@ -427,11 +512,10 @@ export default function Financial() {
                     formatBRL(value),
                     name === "income" ? "Receitas" : "Despesas",
                   ]}
-                  contentStyle={{
-                    borderRadius: 8,
-                    border: "1px solid #e2e8f0",
-                    fontSize: 12,
-                  }}
+                  labelFormatter={(v) => chartDate(String(v))}
+                  contentStyle={chartTheme.tooltip.contentStyle}
+                  labelStyle={chartTheme.tooltip.labelStyle}
+                  itemStyle={chartTheme.tooltip.itemStyle}
                 />
                 <Area
                   type="monotone"
@@ -450,51 +534,12 @@ export default function Financial() {
               </AreaChart>
             </ResponsiveContainer>
           ) : (
-            <div className="h-[240px] flex items-center justify-center text-sm text-muted-foreground">
+            <div className="py-8 flex items-center justify-center text-sm text-muted-foreground">
               Nenhum lançamento no período para exibir o gráfico.
             </div>
           )}
         </CardContent>
       </Card>
-
-      <div className="grid gap-4 md:grid-cols-3 mb-4">
-        <Card className="shadow-soft border-emerald-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-display flex items-center gap-2 text-emerald-700">
-              <CircleDollarSign className="h-4 w-4" /> A receber
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="font-display text-2xl font-bold text-navy">
-              {formatBRL(totals.receivable)}
-            </p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-soft border-destructive/30">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-display flex items-center gap-2 text-destructive">
-              <Banknote className="h-4 w-4" /> A pagar
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="font-display text-2xl font-bold text-navy">
-              {formatBRL(totals.payable)}
-            </p>
-          </CardContent>
-        </Card>
-        <Card className="shadow-soft border-orange-200 bg-orange-50">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-display flex items-center gap-2 text-orange-700">
-              <CalendarX2 className="h-4 w-4" /> Vencidos
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="font-display text-2xl font-bold text-orange-700">
-              {formatBRL(totals.overdue)}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <div className="inline-flex items-center rounded-lg border bg-card p-1 shadow-soft">
@@ -516,9 +561,10 @@ export default function Financial() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             value={searchInput}
+            maxLength={LIMITS.search}
             onChange={(e) => setSearchInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput)}
-            placeholder="Buscar lançamentos"
+            onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput.trim())}
+            placeholder="Buscar por descrição ou categoria"
             className="pl-9"
           />
           {search && (
@@ -548,9 +594,6 @@ export default function Financial() {
             ))}
           </SelectContent>
         </Select>
-        <Button variant="outline" size="sm" onClick={openCreate}>
-          <Plus className="h-3.5 w-3.5" /> Adicionar
-        </Button>
       </div>
 
       {renderTable()}
@@ -589,10 +632,16 @@ export default function Financial() {
               </div>
               <div>
                 <Label>Categoria</Label>
-                <Input
+                <SearchSelect
+                  items={categoryOptions.map((c) => ({ value: c, label: c }))}
                   value={form.category}
-                  onChange={(e) => setForm({ ...form, category: e.target.value })}
-                  placeholder="Ex.: Peças, Aluguel..."
+                  placeholder="Selecione ou crie"
+                  searchPlaceholder="Digite a categoria"
+                  emptyText="Categoria nova."
+                  allowCustom
+                  customMaxLength={LIMITS.shortText}
+                  onSelect={(item) => setForm({ ...form, category: item.label })}
+                  onCustom={(text) => setForm({ ...form, category: text })}
                 />
               </div>
             </div>
@@ -600,41 +649,35 @@ export default function Financial() {
               <Label>Descrição *</Label>
               <Input
                 value={form.description}
+                maxLength={LIMITS.description}
+                aria-invalid={Boolean(formErrors.description) || undefined}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder="Ex.: Pagamento OS #1234"
+                placeholder="Ex.: Conta de energia de março"
               />
-              {formErrors.description && (
-                <p className="text-xs text-destructive mt-1">
-                  {formErrors.description}
-                </p>
-              )}
+              <FieldError message={formErrors.description} />
+              <CharCounter value={form.description} max={LIMITS.description} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label>Valor (R$) *</Label>
-                <Input
-                  inputMode="decimal"
+                <Label>Valor *</Label>
+                <MoneyInput
                   value={form.amount}
-                  onChange={(e) => {
-                    const val = e.target.value.replace(/[^0-9.,]/g, "");
-                    setForm({ ...form, amount: val });
-                  }}
-                  placeholder="0,00"
+                  aria-invalid={Boolean(formErrors.amount) || undefined}
+                  onChange={(v) => setForm({ ...form, amount: v })}
                 />
-                {formErrors.amount && (
-                  <p className="text-xs text-destructive mt-1">{formErrors.amount}</p>
-                )}
+                <FieldError message={formErrors.amount} />
               </div>
               <div>
                 <Label>Vencimento *</Label>
                 <Input
                   type="date"
                   value={form.dueDate}
+                  min={minDue}
+                  max={maxDue}
+                  aria-invalid={Boolean(formErrors.dueDate) || undefined}
                   onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
                 />
-                {formErrors.dueDate && (
-                  <p className="text-xs text-destructive mt-1">{formErrors.dueDate}</p>
-                )}
+                <FieldError message={formErrors.dueDate} />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -686,9 +729,11 @@ export default function Financial() {
               <Label>Observações</Label>
               <Input
                 value={form.notes}
+                maxLength={LIMITS.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 placeholder="Informações complementares"
               />
+              <CharCounter value={form.notes} max={LIMITS.notes} />
             </div>
           </div>
           <DialogFooter>

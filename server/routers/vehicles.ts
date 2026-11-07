@@ -2,84 +2,77 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { protectedProcedure, router } from "../_core/trpc";
 import {
+  countServiceOrders,
   createVehicle,
   deleteVehicle,
+  findVehicleByPlate,
+  getCustomer,
   getVehicle,
   listVehicles,
   listVehiclesByCustomer,
   updateVehicle,
 } from "../db";
+import { idInput, listInput, vehicleInput } from "../validation";
 
-const vehicleInput = z.object({
-  customerId: z.number().int().positive("Selecione o cliente"),
-  plate: z
-    .string()
-    .min(7, "Placa inválida")
-    .max(8)
-    .transform((v) => v.toUpperCase().trim()),
-  brand: z.string().min(1, "Informe a marca").max(120),
-  model: z.string().min(1, "Informe o modelo").max(160),
-  year: z.string().max(8).optional().nullable(),
-  color: z.string().max(80).optional().nullable(),
-  fuel: z.enum(["flex", "gasolina", "etanol", "diesel", "gnv", "eletrico"]).optional().nullable(),
-  mileage: z.number().int().min(0).optional(),
-  notes: z.string().optional().nullable(),
-});
+async function assertVehicleRules(
+  input: { customerId: number; plate: string },
+  exceptId?: number
+) {
+  const customer = await getCustomer(input.customerId);
+  if (!customer) throw new TRPCError({ code: "NOT_FOUND", message: "Proprietário não encontrado" });
+  const duplicate = await findVehicleByPlate(input.plate, exceptId);
+  if (duplicate) {
+    throw new TRPCError({ code: "CONFLICT", message: `A placa ${input.plate} já está cadastrada` });
+  }
+}
 
 export const vehiclesRouter = router({
-  list: protectedProcedure
-    .input(
-      z
-        .object({
-          search: z.string().optional(),
-          page: z.number().int().min(1).optional(),
-          limit: z.number().int().min(1).max(100).optional(),
-        })
-        .optional()
-    )
-    .query(({ input }) => listVehicles(input ?? {})),
+  list: protectedProcedure.input(listInput).query(({ input }) => listVehicles(input ?? {})),
 
   listByCustomer: protectedProcedure
     .input(z.object({ customerId: z.number().int().positive() }))
     .query(({ input }) => listVehiclesByCustomer(input.customerId)),
 
-  get: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
-    .query(async ({ input }) => {
-      const data = await getVehicle(input.id);
-      if (!data) throw new TRPCError({ code: "NOT_FOUND", message: "Veículo não encontrado" });
-      return data;
-    }),
+  get: protectedProcedure.input(idInput).query(async ({ input }) => {
+    const data = await getVehicle(input.id);
+    if (!data) throw new TRPCError({ code: "NOT_FOUND", message: "Veículo não encontrado" });
+    return data;
+  }),
 
   create: protectedProcedure.input(vehicleInput).mutation(async ({ input }) => {
-    const existing = await listVehicles({ search: input.plate });
-    const duplicate = existing.rows.find((v) => v.plate === input.plate);
-    if (duplicate) {
-      throw new TRPCError({ code: "CONFLICT", message: "Já existe um veículo com essa placa" });
-    }
+    await assertVehicleRules(input);
     return createVehicle(input);
   }),
 
   update: protectedProcedure
-    .input(vehicleInput.merge(z.object({ id: z.number().int().positive() })))
+    .input(vehicleInput.extend({ id: z.number().int().positive() }))
     .mutation(async ({ input }) => {
       const { id, ...data } = input;
-      const existingRows = await listVehicles({});
-      const duplicate = existingRows.rows.find(
-        (v) => v.plate === input.plate && v.id !== id
-      );
-      if (duplicate) {
-        throw new TRPCError({ code: "CONFLICT", message: "Já existe um veículo com essa placa" });
+      const existing = await getVehicle(id);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Veículo não encontrado" });
+      await assertVehicleRules(data, id);
+      // Regra: a quilometragem nunca diminui depois de registrada em OS.
+      const lastOsMileage = Math.max(0, ...existing.osRows.map((os) => os.mileage ?? 0));
+      if (data.mileage !== undefined && data.mileage < lastOsMileage) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `A quilometragem não pode ser menor que a registrada na última OS (${lastOsMileage.toLocaleString("pt-BR")} km)`,
+        });
       }
       return updateVehicle(id, data);
     }),
 
-  delete: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
-    .mutation(async ({ input }) => {
-      const existing = await getVehicle(input.id);
-      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Veículo não encontrado" });
-      await deleteVehicle(input.id);
-      return { success: true };
-    }),
+  delete: protectedProcedure.input(idInput).mutation(async ({ input }) => {
+    const existing = await getVehicle(input.id);
+    if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Veículo não encontrado" });
+    const osCount = await countServiceOrders({ vehicleId: input.id });
+    if (osCount > 0) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: `O veículo ${existing.vehicle.plate} possui ${osCount} ordem(ns) de serviço e não pode ser excluído.`,
+      });
+    }
+    await deleteVehicle(input.id);
+    return { success: true };
+  }),
 });

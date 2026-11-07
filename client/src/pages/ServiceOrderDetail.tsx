@@ -110,6 +110,8 @@ export default function ServiceOrderDetail() {
 
         utils.serviceOrders.list.invalidate();
         utils.dashboard.summary.invalidate();
+        utils.stock.list.invalidate();
+        utils.financial.list.invalidate();
 
         toast.success("OS reaberta com sucesso");
       },
@@ -128,6 +130,8 @@ export default function ServiceOrderDetail() {
 
         utils.serviceOrders.list.invalidate();
         utils.dashboard.summary.invalidate();
+        utils.stock.list.invalidate();
+        utils.financial.list.invalidate();
 
         toast.success("OS cancelada");
       },
@@ -219,7 +223,7 @@ export default function ServiceOrderDetail() {
 
             <div>
               <h1 className="font-display text-2xl font-bold tracking-tight">
-                OS #{os.number}
+                {os.number}
               </h1>
 
               <div className="mt-1 flex items-center gap-2">
@@ -245,6 +249,12 @@ export default function ServiceOrderDetail() {
             <Button
               variant="outline"
               size="sm"
+              disabled={isCompleted || isCancelled}
+              title={
+                isCompleted || isCancelled
+                  ? "Reabra a OS para poder editá-la"
+                  : undefined
+              }
               onClick={() =>
                 setLocation(`/os/${osId}/editar`)
               }
@@ -460,7 +470,7 @@ export default function ServiceOrderDetail() {
 
             {/* REABRIR */}
 
-            {isCompleted && (
+            {(isCompleted || isCancelled) && (
               <AlertDialog>
 
                 <AlertDialogTrigger asChild>
@@ -484,8 +494,9 @@ export default function ServiceOrderDetail() {
                     </AlertDialogTitle>
 
                     <AlertDialogDescription>
-                      A receita registrada automaticamente será cancelada
-                      no financeiro.
+                      {isCompleted
+                        ? "As peças voltam para o estoque e a receita registrada automaticamente será cancelada no financeiro. A OS volta para \"Em andamento\" e poderá ser editada."
+                        : "A OS volta para \"Em andamento\" e poderá ser editada novamente."}
                     </AlertDialogDescription>
 
                   </AlertDialogHeader>
@@ -542,8 +553,9 @@ export default function ServiceOrderDetail() {
                     </AlertDialogTitle>
 
                     <AlertDialogDescription>
-                      A OS será marcada como cancelada e os efeitos
-                      automáticos no estoque e financeiro serão revertidos.
+                      {isCompleted
+                        ? "A OS será marcada como cancelada: as peças voltam para o estoque e a receita automática é cancelada no financeiro."
+                        : "A OS será marcada como cancelada e não poderá mais ser editada (só reaberta)."}
                     </AlertDialogDescription>
 
                   </AlertDialogHeader>

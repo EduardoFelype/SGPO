@@ -38,9 +38,21 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatDocument, formatMileage, maskCPF, maskCNPJ, maskPhone, maskCEP } from "@/lib/format";
+import { CharCounter, FieldError } from "@/components/FormFields";
+import { formatDocument, maskCPF, maskCNPJ, maskPhone, maskCEP } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
-import { Car, Edit2, Eye, Loader2, Search, Trash2, UserPlus } from "lucide-react";
+import {
+  LIMITS,
+  UF_LIST,
+  cleanText,
+  isValidCEP,
+  isValidCNPJ,
+  isValidCPF,
+  isValidEmail,
+  isValidPhone,
+  onlyDigits,
+} from "@shared/limits";
+import { Edit2, Loader2, Search, Trash2, UserPlus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
@@ -121,6 +133,13 @@ export default function Customers() {
   });
 
   const [deleteId, setDeleteId] = useState<number | null>(null);
+  const [cepLoading, setCepLoading] = useState(false);
+  /** Sem nenhum cadastro e sem busca: o botão de criar fica só no aviso central. */
+  const isFirstUse = !isLoading && !isError && !search && (data?.total ?? 0) === 0;
+  const clearSearch = () => {
+    setSearch("");
+    setSearchInput("");
+  };
 
   function openCreate() {
     setEditingId(null);
@@ -155,22 +174,61 @@ export default function Customers() {
 
   function validate() {
     const errors: Record<string, string> = {};
-    if (form.name.trim().length < 2) errors.name = "Informe o nome (mín. 2 caracteres)";
-    if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email))
-      errors.email = "E-mail inválido";
+    const name = cleanText(form.name);
+    if (name.length < LIMITS.nameMin) errors.name = `Informe o nome (mín. ${LIMITS.nameMin} caracteres)`;
+    if (form.document) {
+      if (form.type === "cpf" && !isValidCPF(form.document)) errors.document = "CPF inválido";
+      if (form.type === "cnpj" && !isValidCNPJ(form.document)) errors.document = "CNPJ inválido";
+    }
+    if (form.phone && !isValidPhone(form.phone)) errors.phone = "Telefone inválido (DDD + número)";
+    if (form.whatsapp && !isValidPhone(form.whatsapp)) errors.whatsapp = "WhatsApp inválido (DDD + número)";
+    if (form.email && !isValidEmail(form.email)) errors.email = "E-mail inválido";
+    if (form.zipCode && !isValidCEP(form.zipCode)) errors.zipCode = "CEP deve ter 8 dígitos";
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
+  }
+
+  /** Preenche o endereço pelo CEP usando a API gratuita ViaCEP. */
+  async function lookupCep(cep: string) {
+    if (!isValidCEP(cep)) return;
+    setCepLoading(true);
+    try {
+      const res = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+      const json = (await res.json()) as {
+        erro?: boolean;
+        logradouro?: string;
+        bairro?: string;
+        localidade?: string;
+        uf?: string;
+      };
+      if (json.erro) {
+        setFormErrors((e) => ({ ...e, zipCode: "CEP não encontrado" }));
+        return;
+      }
+      setForm((f) => ({
+        ...f,
+        address: (json.logradouro || f.address).slice(0, LIMITS.address),
+        neighborhood: (json.bairro || f.neighborhood).slice(0, LIMITS.neighborhood),
+        city: (json.localidade || f.city).slice(0, LIMITS.city),
+        stateCode: json.uf || f.stateCode,
+      }));
+      setFormErrors(({ zipCode: _z, ...rest }) => rest);
+    } catch {
+      // Sem internet ou ViaCEP fora do ar: o usuário preenche manualmente
+    } finally {
+      setCepLoading(false);
+    }
   }
 
   function submit() {
     if (!validate()) return;
     const payload = {
       type: form.type,
-      name: form.name.trim(),
-      document: form.document.replace(/\D/g, "").trim() || null,
-      phone: form.phone.trim() || null,
-      whatsapp: form.whatsapp.trim() || null,
-      email: form.email.trim() || null,
+      name: cleanText(form.name),
+      document: onlyDigits(form.document) || null,
+      phone: onlyDigits(form.phone) || null,
+      whatsapp: onlyDigits(form.whatsapp) || null,
+      email: form.email.trim().toLowerCase() || null,
       zipCode: form.zipCode.trim() || null,
       address: form.address.trim() || null,
       number: form.number.trim() || null,
@@ -192,7 +250,7 @@ export default function Customers() {
       <PageHeader
         title="Clientes"
         subtitle={`${data?.total ?? ""} ${data?.total === 1 ? "cliente cadastrado" : "clientes cadastrados"}`}
-        action
+        action={!isFirstUse}
         actionLabel="Novo cliente"
         onAction={openCreate}
       />
@@ -201,8 +259,9 @@ export default function Customers() {
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           value={searchInput}
+          maxLength={LIMITS.search}
           onChange={(e) => setSearchInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput)}
+          onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput.trim())}
           placeholder="Buscar por nome, CPF/CNPJ, telefone ou e-mail"
           className="pl-9"
         />
@@ -226,10 +285,15 @@ export default function Customers() {
 
       {!isLoading && !isError && (data?.rows.length ?? 0) === 0 && (
         <EmptyState
-          title="Nenhum cliente cadastrado"
-          description="Cadastre clientes para vincular veículos e ordens de serviço."
-          action={openCreate}
+          title={search ? "Nenhum cliente encontrado" : "Nenhum cliente cadastrado"}
+          description={
+            search
+              ? `Nenhum resultado para “${search}”.`
+              : "Cadastre clientes para vincular veículos e ordens de serviço."
+          }
+          action={search ? undefined : openCreate}
           actionLabel="Cadastrar cliente"
+          secondaryAction={search ? clearSearch : undefined}
           icon={<UserPlus className="h-6 w-6" />}
         />
       )}
@@ -240,11 +304,11 @@ export default function Customers() {
             <TableHeader>
               <TableRow>
                 <TableHead>Nome / Razão social</TableHead>
-                <TableHead>Tipo</TableHead>
+                <TableHead className="hidden xl:table-cell">Tipo</TableHead>
                 <TableHead>CPF/CNPJ</TableHead>
                 <TableHead>Telefone</TableHead>
-                <TableHead>E-mail</TableHead>
-                <TableHead>Cidade</TableHead>
+                <TableHead className="hidden xl:table-cell">E-mail</TableHead>
+                <TableHead className="hidden lg:table-cell">Cidade</TableHead>
                 <TableHead className="text-right">Ações</TableHead>
               </TableRow>
             </TableHeader>
@@ -259,15 +323,17 @@ export default function Customers() {
                       {c.name}
                     </Link>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden xl:table-cell">
                     <Badge variant="outline" className="bg-muted/50">
                       {c.type === "cpf" ? "CPF" : "CNPJ"}
                     </Badge>
                   </TableCell>
-                  <TableCell>{formatDocument(c.document)}</TableCell>
-                  <TableCell>{c.phone ?? "—"}</TableCell>
-                  <TableCell className="max-w-40 truncate">{c.email ?? "—"}</TableCell>
-                  <TableCell>
+                  <TableCell className="whitespace-nowrap">{formatDocument(c.document)}</TableCell>
+                  <TableCell className="whitespace-nowrap">
+                    {c.phone ? maskPhone(c.phone) : c.whatsapp ? maskPhone(c.whatsapp) : "—"}
+                  </TableCell>
+                  <TableCell className="max-w-40 truncate hidden xl:table-cell">{c.email ?? "—"}</TableCell>
+                  <TableCell className="hidden lg:table-cell">
                     {[c.city, c.stateCode].filter(Boolean).join(" - ") || "—"}
                   </TableCell>
                   <TableCell className="text-right">
@@ -313,7 +379,10 @@ export default function Customers() {
               <Label>Tipo de pessoa *</Label>
               <Select
                 value={form.type}
-                onValueChange={(v) => setForm({ ...form, type: v as "cpf" | "cnpj", document: "" })}
+                onValueChange={(v) => {
+                  setForm({ ...form, type: v as "cpf" | "cnpj", document: "" });
+                  setFormErrors(({ document: _d, ...rest }) => rest);
+                }}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -327,31 +396,45 @@ export default function Customers() {
                 {form.type === "cpf" ? "CPF" : "CNPJ"}
               </Label>
               <Input
+                inputMode="numeric"
                 value={form.type === "cpf" ? maskCPF(form.document) : maskCNPJ(form.document)}
+                aria-invalid={Boolean(formErrors.document) || undefined}
                 onChange={(e) => {
                   const raw = e.target.value.replace(/\D/g, "");
                   const maxLen = form.type === "cpf" ? 11 : 14;
                   setForm({ ...form, document: raw.slice(0, maxLen) });
                 }}
+                onBlur={() => {
+                  if (!form.document) return;
+                  const ok = form.type === "cpf" ? isValidCPF(form.document) : isValidCNPJ(form.document);
+                  setFormErrors((e) => {
+                    const { document: _d, ...rest } = e;
+                    return ok ? rest : { ...rest, document: `${form.type === "cpf" ? "CPF" : "CNPJ"} inválido` };
+                  });
+                }}
                 maxLength={form.type === "cpf" ? 14 : 18}
                 placeholder={form.type === "cpf" ? "000.000.000-00" : "00.000.000/0000-00"}
               />
+              <FieldError message={formErrors.document} />
             </div>
             <div className="col-span-2">
-              <Label>Nome / Razão social *</Label>
+              <Label>{form.type === "cpf" ? "Nome completo *" : "Razão social *"}</Label>
               <Input
                 value={form.name}
+                maxLength={LIMITS.nameMax}
+                aria-invalid={Boolean(formErrors.name) || undefined}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="Nome completo ou razão social"
+                placeholder={form.type === "cpf" ? "Nome completo" : "Razão social"}
               />
-              {formErrors.name && (
-                <p className="text-xs text-destructive mt-1">{formErrors.name}</p>
-              )}
+              <FieldError message={formErrors.name} />
+              <CharCounter value={form.name} max={LIMITS.nameMax} />
             </div>
             <div>
               <Label>Telefone</Label>
               <Input
+                inputMode="tel"
                 value={maskPhone(form.phone)}
+                aria-invalid={Boolean(formErrors.phone) || undefined}
                 onChange={(e) => {
                   const raw = e.target.value.replace(/\D/g, "");
                   setForm({ ...form, phone: raw.slice(0, 11) });
@@ -359,11 +442,25 @@ export default function Customers() {
                 maxLength={15}
                 placeholder="(00) 0000-0000"
               />
+              <FieldError message={formErrors.phone} />
             </div>
             <div>
-              <Label>WhatsApp</Label>
+              <div className="flex items-center justify-between">
+                <Label>WhatsApp</Label>
+                {form.phone.length === 11 && !form.whatsapp && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-primary hover:underline"
+                    onClick={() => setForm({ ...form, whatsapp: form.phone })}
+                  >
+                    Usar o telefone
+                  </button>
+                )}
+              </div>
               <Input
+                inputMode="tel"
                 value={maskPhone(form.whatsapp)}
+                aria-invalid={Boolean(formErrors.whatsapp) || undefined}
                 onChange={(e) => {
                   const raw = e.target.value.replace(/\D/g, "");
                   setForm({ ...form, whatsapp: raw.slice(0, 11) });
@@ -371,46 +468,63 @@ export default function Customers() {
                 maxLength={15}
                 placeholder="(00) 00000-0000"
               />
+              <FieldError message={formErrors.whatsapp} />
             </div>
             <div className="col-span-2">
               <Label>E-mail</Label>
               <Input
                 type="email"
                 value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                maxLength={LIMITS.email}
+                aria-invalid={Boolean(formErrors.email) || undefined}
+                onChange={(e) => setForm({ ...form, email: e.target.value.replace(/\s/g, "") })}
                 placeholder="email@exemplo.com"
               />
-              {formErrors.email && (
-                <p className="text-xs text-destructive mt-1">{formErrors.email}</p>
-              )}
+              <FieldError message={formErrors.email} />
             </div>
             <div>
               <Label>CEP</Label>
-              <Input
-                value={maskCEP(form.zipCode)}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/\D/g, "");
-                  setForm({ ...form, zipCode: raw.slice(0, 8) });
-                }}
-                maxLength={9}
-                placeholder="00000-000"
-              />
+              <div className="relative">
+                <Input
+                  inputMode="numeric"
+                  value={maskCEP(form.zipCode)}
+                  aria-invalid={Boolean(formErrors.zipCode) || undefined}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, "").slice(0, 8);
+                    setForm({ ...form, zipCode: raw });
+                    if (raw.length === 8) lookupCep(raw);
+                  }}
+                  maxLength={9}
+                  placeholder="00000-000"
+                />
+                {cepLoading && (
+                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+              </div>
+              {formErrors.zipCode ? (
+                <FieldError message={formErrors.zipCode} />
+              ) : (
+                <p className="text-[11px] text-muted-foreground mt-1">O endereço é preenchido pelo CEP</p>
+              )}
             </div>
             <div>
               <Label>Número</Label>
               <Input
                 value={form.number}
+                maxLength={LIMITS.addressNumber}
                 onChange={(e) => {
-                  const raw = e.target.value.replace(/\D/g, "");
+                  // Aceita números e "S/N"
+                  const raw = e.target.value.toUpperCase().replace(/[^0-9A-Z/ -]/g, "");
                   setForm({ ...form, number: raw });
                 }}
-                placeholder="123"
+                placeholder="123 ou S/N"
               />
             </div>
             <div className="col-span-2">
               <Label>Endereço</Label>
               <Input
                 value={form.address}
+                maxLength={LIMITS.address}
                 onChange={(e) => setForm({ ...form, address: e.target.value })}
                 placeholder="Rua, avenida etc."
               />
@@ -419,6 +533,7 @@ export default function Customers() {
               <Label>Complemento</Label>
               <Input
                 value={form.complement}
+                maxLength={LIMITS.complement}
                 onChange={(e) => setForm({ ...form, complement: e.target.value })}
                 placeholder="Sala, bloco etc."
               />
@@ -427,6 +542,7 @@ export default function Customers() {
               <Label>Bairro</Label>
               <Input
                 value={form.neighborhood}
+                maxLength={LIMITS.neighborhood}
                 onChange={(e) => setForm({ ...form, neighborhood: e.target.value })}
               />
             </div>
@@ -435,26 +551,37 @@ export default function Customers() {
                 <Label>Cidade</Label>
                 <Input
                   value={form.city}
+                  maxLength={LIMITS.city}
                   onChange={(e) => setForm({ ...form, city: e.target.value })}
                 />
               </div>
               <div>
                 <Label>UF</Label>
-                <Input
-                  value={form.stateCode}
-                  maxLength={2}
-                  onChange={(e) => setForm({ ...form, stateCode: e.target.value.toUpperCase() })}
-                  placeholder="UF"
-                />
+                <Select
+                  value={form.stateCode || "none"}
+                  onValueChange={(v) => setForm({ ...form, stateCode: v === "none" ? "" : v })}
+                >
+                  <SelectTrigger className="px-2"><SelectValue placeholder="UF" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">—</SelectItem>
+                    {UF_LIST.map((uf) => (
+                      <SelectItem key={uf} value={uf}>
+                        {uf}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="col-span-2">
               <Label>Observações</Label>
               <Textarea
                 value={form.notes}
+                maxLength={LIMITS.notes}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 rows={2}
               />
+              <CharCounter value={form.notes} max={LIMITS.notes} />
             </div>
           </div>
           <DialogFooter className="gap-2">
@@ -484,8 +611,8 @@ export default function Customers() {
           <AlertDialogHeader>
             <AlertDialogTitle>Excluir cliente?</AlertDialogTitle>
             <AlertDialogDescription>
-              Essa ação não pode ser desfeita. O histórico do cliente permanecerá nos
-              relatórios já gerados.
+              Essa ação não pode ser desfeita e remove também os veículos do cliente. Clientes com
+              ordens de serviço registradas não podem ser excluídos, para preservar o histórico.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

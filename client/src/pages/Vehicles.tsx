@@ -1,8 +1,12 @@
 import DashboardLayout from "@/components/DashboardLayout";
+import { CharCounter, FieldError, FieldHint, IntegerInput } from "@/components/FormFields";
+import { SearchSelect } from "@/components/SearchSelect";
+import { VehicleModelPicker, type Fuel } from "@/components/VehicleModelPicker";
 import { EmptyState, ErrorState, LoadingCard, PageHeader } from "@/components/sgpo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,7 +42,14 @@ import {
 } from "@/components/ui/table";
 import { formatMileage } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
-import { Car, Edit2, Loader2, Search, Trash2 } from "lucide-react";
+import {
+  LIMITS,
+  isValidPlate,
+  isValidVehicleYear,
+  normalizePlate,
+  plateFormat,
+} from "@shared/limits";
+import { Car, CheckCircle2, Edit2, Loader2, Search, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
@@ -50,8 +61,8 @@ type VehicleForm = {
   model: string;
   year: string;
   color: string;
-  fuel: "" | "flex" | "gasolina" | "etanol" | "diesel" | "gnv" | "eletrico";
-  mileage: string;
+  fuel: Fuel;
+  mileage: number | null;
   notes: string;
 };
 
@@ -63,9 +74,29 @@ const emptyForm: VehicleForm = {
   year: "",
   color: "",
   fuel: "",
-  mileage: "",
+  mileage: null,
   notes: "",
 };
+
+const FUEL_LABEL: Record<string, string> = {
+  flex: "Flex",
+  gasolina: "Gasolina",
+  etanol: "Etanol",
+  diesel: "Diesel",
+  gnv: "GNV",
+  eletrico: "Elétrico",
+};
+
+/** Cores mais comuns da frota brasileira — evita digitação e variações ("prata", "Prata ", "PRATA"). */
+const COMMON_COLORS = [
+  "Branco", "Preto", "Prata", "Cinza", "Vermelho", "Azul", "Marrom", "Bege", "Verde",
+  "Amarelo", "Laranja", "Dourado", "Vinho", "Grafite",
+];
+
+/** Formata a placa para exibição: ABC-1234 (antiga) ou ABC1D23 (Mercosul). */
+function displayPlate(plate: string) {
+  return plateFormat(plate) === "antiga" ? `${plate.slice(0, 3)}-${plate.slice(3)}` : plate;
+}
 
 export default function Vehicles() {
   const [search, setSearch] = useState("");
@@ -114,12 +145,22 @@ export default function Vehicles() {
     onError: (e) => toast.error(e.message),
   });
 
-  function openCreate() {
+  function openCreate(customerId = "") {
     setEditingId(null);
-    setForm(emptyForm);
+    setForm({ ...emptyForm, customerId });
     setFormErrors({});
     setDialogOpen(true);
   }
+
+  // Vindo da ficha do cliente (/veiculos?novo=1&cliente=ID): abre o cadastro já com o dono escolhido
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("novo") === "1") {
+      openCreate(params.get("cliente") ?? "");
+      window.history.replaceState(null, "", "/veiculos");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function openEdit(id: number) {
     const vehicle = data?.rows.find((v) => v.id === id);
@@ -132,8 +173,8 @@ export default function Vehicles() {
       model: vehicle.model ?? "",
       year: vehicle.year ?? "",
       color: vehicle.color ?? "",
-      fuel: vehicle.fuel ?? "",
-      mileage: String(vehicle.mileage ?? ""),
+      fuel: (vehicle.fuel ?? "") as Fuel,
+      mileage: vehicle.mileage ?? null,
       notes: vehicle.notes ?? "",
     });
     setFormErrors({});
@@ -143,9 +184,10 @@ export default function Vehicles() {
   function validate() {
     const errors: Record<string, string> = {};
     if (!form.customerId) errors.customerId = "Selecione o proprietário";
-    if (form.plate.trim().length < 6) errors.plate = "Informe a placa completa (mín. 6 caracteres)";
-    if (!form.brand.trim()) errors.brand = "Informe a marca";
-    if (!form.model.trim()) errors.model = "Informe o modelo";
+    if (!isValidPlate(form.plate)) errors.plate = "Placa inválida. Use ABC1234 ou Mercosul ABC1D23";
+    if (!form.brand.trim()) errors.brand = "Selecione a marca";
+    if (!form.model.trim()) errors.model = "Selecione o modelo";
+    if (form.year && !isValidVehicleYear(form.year)) errors.year = "Ano inválido";
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   }
@@ -154,13 +196,13 @@ export default function Vehicles() {
     if (!validate()) return;
     const payload = {
       customerId: Number(form.customerId),
-      plate: form.plate.trim().toUpperCase(),
+      plate: normalizePlate(form.plate),
       brand: form.brand.trim(),
       model: form.model.trim(),
-      year: form.year.trim() || null,
+      year: form.year || null,
       color: form.color.trim() || null,
       fuel: form.fuel || null,
-      mileage: form.mileage ? Number(form.mileage) : 0,
+      mileage: form.mileage ?? 0,
       notes: form.notes.trim() || null,
     };
     if (editingId) {
@@ -170,23 +212,29 @@ export default function Vehicles() {
     }
   }
 
+  const plateKind = plateFormat(form.plate);
+  /** Sem nenhum cadastro e sem busca: o botão de criar fica só no aviso central. */
+  const isFirstUse = !isLoading && !isError && !search && (data?.total ?? 0) === 0;
+  const selectedCustomer = customers?.rows.find((c) => String(c.id) === form.customerId);
+
   return (
     <DashboardLayout>
       <PageHeader
         title="Veículos"
         subtitle={`${data?.total ?? ""} ${data?.total === 1 ? "veículo cadastrado" : "veículos cadastrados"}`}
-        action
+        action={!isFirstUse}
         actionLabel="Novo veículo"
-        onAction={openCreate}
+        onAction={() => openCreate()}
       />
 
       <div className="relative mb-4 max-w-sm">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           value={searchInput}
+          maxLength={LIMITS.search}
           onChange={(e) => setSearchInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput)}
-          placeholder="Buscar por placa, marca, modelo ou chassi"
+          onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput.trim())}
+          placeholder="Buscar por placa, marca, modelo ou proprietário"
           className="pl-9"
         />
         {search && (
@@ -209,10 +257,22 @@ export default function Vehicles() {
 
       {!isLoading && !isError && (data?.rows.length ?? 0) === 0 && (
         <EmptyState
-          title="Nenhum veículo cadastrado"
-          description="Cadastre veículos vinculando-os a um cliente para iniciar ordens de serviço."
-          action={openCreate}
+          title={search ? "Nenhum veículo encontrado" : "Nenhum veículo cadastrado"}
+          description={
+            search
+              ? `Nenhum resultado para “${search}”.`
+              : "Cadastre veículos vinculando-os a um cliente para iniciar ordens de serviço."
+          }
+          action={search ? undefined : () => openCreate()}
           actionLabel="Cadastrar veículo"
+          secondaryAction={
+            search
+              ? () => {
+                  setSearch("");
+                  setSearchInput("");
+                }
+              : undefined
+          }
           icon={<Car className="h-6 w-6" />}
         />
       )}
@@ -224,10 +284,10 @@ export default function Vehicles() {
               <TableRow>
                 <TableHead>Placa</TableHead>
                 <TableHead>Marca / Modelo</TableHead>
-                <TableHead>Combustível</TableHead>
+                <TableHead className="hidden xl:table-cell">Combustível</TableHead>
                 <TableHead>Ano</TableHead>
-                <TableHead>Cor</TableHead>
-                <TableHead>Quilometragem</TableHead>
+                <TableHead className="hidden xl:table-cell">Cor</TableHead>
+                <TableHead className="hidden lg:table-cell">Quilometragem</TableHead>
                 <TableHead>Proprietário</TableHead>
                 <TableHead className="text-right">Ações</TableHead>
               </TableRow>
@@ -236,32 +296,32 @@ export default function Vehicles() {
               {data.rows.map((v) => (
                 <TableRow key={v.id}>
                   <TableCell>
-                    <span className="font-display font-bold tracking-wide text-navy">
-                      {v.plate}
+                    <span className="font-display font-bold tracking-wide text-navy whitespace-nowrap">
+                      {displayPlate(v.plate)}
                     </span>
                   </TableCell>
-                  <TableCell>
-                    {[v.brand, v.model].filter(Boolean).join(" ") || "—"}
+                  <TableCell className="max-w-64">
+                    <p className="font-medium truncate">{v.brand || "—"}</p>
+                    <p className="text-xs text-muted-foreground truncate" title={v.model}>
+                      {v.model || "—"}
+                    </p>
                   </TableCell>
-                  <TableCell>
-                    {v.fuel
-                      ? v.fuel === "flex"
-                        ? "Flex"
-                        : v.fuel === "gasolina"
-                          ? "Gasolina"
-                          : v.fuel === "etanol"
-                            ? "Etanol"
-                            : v.fuel === "diesel"
-                              ? "Diesel"
-                              : v.fuel === "gnv"
-                                ? "GNV"
-                                : "Elétrico"
-                      : "—"}
-                  </TableCell>
+                  <TableCell className="hidden xl:table-cell">{v.fuel ? FUEL_LABEL[v.fuel] : "—"}</TableCell>
                   <TableCell>{v.year ?? "—"}</TableCell>
-                  <TableCell>{v.color ?? "—"}</TableCell>
-                  <TableCell>{formatMileage(v.mileage)}</TableCell>
-                  <TableCell>{v.customerId ? "—" : "—"}</TableCell>
+                  <TableCell className="hidden xl:table-cell">{v.color ?? "—"}</TableCell>
+                  <TableCell className="whitespace-nowrap hidden lg:table-cell">{formatMileage(v.mileage)}</TableCell>
+                  <TableCell className="max-w-40">
+                    {v.customerName ? (
+                      <Link
+                        href={`/clientes/${v.customerId}`}
+                        className="truncate block hover:text-primary hover:underline"
+                      >
+                        {v.customerName}
+                      </Link>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
                       <Button
@@ -296,30 +356,22 @@ export default function Vehicles() {
           <DialogHeader>
             <DialogTitle>{editingId ? "Editar veículo" : "Novo veículo"}</DialogTitle>
             <DialogDescription>
-              Vincule o veículo a um cliente cadastrado. Placa, marca e modelo são obrigatórios.
+              Vincule o veículo a um cliente. Marca, modelo e ano vêm da Tabela FIPE para evitar nomes errados.
             </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
               <Label>Proprietário *</Label>
-              <Select
-                value={form.customerId}
-                onValueChange={(v) => setForm({ ...form, customerId: v })}
-              >
-                <SelectTrigger className={formErrors.customerId ? "border-destructive" : ""}>
-                  <SelectValue placeholder="Selecione um cliente" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(customers?.rows ?? []).map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {formErrors.customerId && (
-                <p className="text-xs text-destructive mt-1">{formErrors.customerId}</p>
-              )}
+              <SearchSelect
+                items={(customers?.rows ?? []).map((c) => ({ value: String(c.id), label: c.name }))}
+                value={selectedCustomer?.name ?? ""}
+                invalid={Boolean(formErrors.customerId)}
+                placeholder="Selecione um cliente"
+                searchPlaceholder="Digite o nome do cliente"
+                emptyText="Nenhum cliente encontrado."
+                onSelect={(item) => setForm({ ...form, customerId: item.value })}
+              />
+              <FieldError message={formErrors.customerId} />
               {(customers?.rows.length ?? 0) === 0 && (
                 <p className="text-xs text-muted-foreground mt-1">
                   Nenhum cliente cadastrado.{" "}
@@ -334,93 +386,85 @@ export default function Vehicles() {
               <Input
                 value={form.plate}
                 maxLength={8}
-                onChange={(e) => setForm({ ...form, plate: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") })}
+                autoComplete="off"
+                className="uppercase tracking-wider font-medium"
+                aria-invalid={Boolean(formErrors.plate) || undefined}
+                onChange={(e) => setForm({ ...form, plate: normalizePlate(e.target.value).slice(0, 7) })}
                 placeholder="ABC1D23"
               />
-              {formErrors.plate && (
-                <p className="text-xs text-destructive mt-1">{formErrors.plate}</p>
+              {formErrors.plate ? (
+                <FieldError message={formErrors.plate} />
+              ) : plateKind ? (
+                <p className="text-[11px] text-green-700 dark:text-green-400 mt-1 flex items-center gap-1">
+                  <CheckCircle2 className="h-3 w-3" />
+                  {plateKind === "mercosul" ? "Placa Mercosul" : "Placa padrão antigo"}
+                </p>
+              ) : (
+                <FieldHint>7 caracteres: ABC1234 ou ABC1D23</FieldHint>
               )}
             </div>
             <div>
               <Label>Combustível</Label>
               <Select
                 value={form.fuel || "none"}
-                onValueChange={(v) => setForm({ ...form, fuel: v === "none" ? "" : (v as VehicleForm["fuel"]) })}
+                onValueChange={(v) => setForm({ ...form, fuel: v === "none" ? "" : (v as Fuel) })}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Não informado</SelectItem>
-                  <SelectItem value="flex">Flex</SelectItem>
-                  <SelectItem value="gasolina">Gasolina</SelectItem>
-                  <SelectItem value="etanol">Etanol</SelectItem>
-                  <SelectItem value="diesel">Diesel</SelectItem>
-                  <SelectItem value="gnv">GNV</SelectItem>
-                  <SelectItem value="eletrico">Elétrico</SelectItem>
+                  {Object.entries(FUEL_LABEL).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label>Marca *</Label>
-              <Input
-                value={form.brand}
-                onChange={(e) => setForm({ ...form, brand: e.target.value })}
-                placeholder="Ex.: Toyota"
-              />
-              {formErrors.brand && (
-                <p className="text-xs text-destructive mt-1">{formErrors.brand}</p>
-              )}
-            </div>
-            <div>
-              <Label>Modelo *</Label>
-              <Input
-                value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
-                placeholder="Ex.: Corolla XEi"
-              />
-              {formErrors.model && (
-                <p className="text-xs text-destructive mt-1">{formErrors.model}</p>
-              )}
-            </div>
-            <div>
-              <Label>Ano</Label>
-              <Input
-                inputMode="numeric"
-                value={form.year}
-                maxLength={4}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/\D/g, "");
-                  setForm({ ...form, year: raw.slice(0, 4) });
-                }}
-                placeholder="2024"
-              />
-            </div>
+
+            <VehicleModelPicker
+              brand={form.brand}
+              model={form.model}
+              year={form.year}
+              fuel={form.fuel}
+              errors={{ brand: formErrors.brand, model: formErrors.model, year: formErrors.year }}
+              onChange={(patch) => setForm((f) => ({ ...f, ...patch }))}
+            />
+
             <div>
               <Label>Cor</Label>
-              <Input
+              <SearchSelect
+                items={COMMON_COLORS.map((c) => ({ value: c, label: c }))}
                 value={form.color}
-                onChange={(e) => setForm({ ...form, color: e.target.value })}
-                placeholder="Ex.: Prata"
+                placeholder="Selecione a cor"
+                searchPlaceholder="Digite a cor"
+                emptyText="Cor não listada."
+                allowCustom
+                customMaxLength={LIMITS.shortText}
+                onSelect={(item) => setForm({ ...form, color: item.label })}
+                onCustom={(text) => setForm({ ...form, color: text })}
               />
             </div>
-            <div>
+            <div className="col-span-2 sm:col-span-1">
               <Label>Quilometragem</Label>
-              <Input
-                inputMode="numeric"
-                value={form.mileage ? Number(form.mileage).toLocaleString("pt-BR") : ""}
-                onChange={(e) => {
-                  const raw = e.target.value.replace(/\D/g, "");
-                  setForm({ ...form, mileage: raw });
-                }}
+              <IntegerInput
+                value={form.mileage}
+                max={LIMITS.mileageMax}
+                suffix="km"
+                onChange={(v) => setForm({ ...form, mileage: v })}
                 placeholder="Ex.: 45.000"
               />
+              <FieldHint>Máximo {LIMITS.mileageMax.toLocaleString("pt-BR")} km</FieldHint>
             </div>
             <div className="col-span-2">
               <Label>Observações</Label>
-              <Input
+              <Textarea
                 value={form.notes}
+                maxLength={LIMITS.notes}
+                rows={2}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 placeholder="Detalhes adicionais (opcional)"
               />
+              <CharCounter value={form.notes} max={LIMITS.notes} />
             </div>
           </div>
           <DialogFooter className="gap-2">
@@ -446,8 +490,8 @@ export default function Vehicles() {
           <AlertDialogHeader>
             <AlertDialogTitle>Excluir veículo?</AlertDialogTitle>
             <AlertDialogDescription>
-              Essa ação não pode ser desfeita. Ordens de serviço vinculadas a este veículo
-              continuarão registradas.
+              Essa ação não pode ser desfeita. Veículos com ordens de serviço registradas não podem
+              ser excluídos, para preservar o histórico.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

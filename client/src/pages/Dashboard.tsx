@@ -10,6 +10,7 @@ import {
   OS_STATUS_LABEL,
 } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
+import { chartDate, chartMoney, chartTheme } from "@/lib/chartTheme";
 import {
   AlertTriangle,
   ArrowUpRight,
@@ -34,12 +35,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { StatusBadge } from "@/components/sgpo";
 
+/** Cores do tema (mudam sozinhas entre claro e escuro). */
 const CHART_COLORS = {
-  receita: "#1d5a96",
-  despesa: "#F26A1F",
+  receita: "var(--chart-1)",
+  despesa: "var(--chart-2)",
   saldo: "#0B1B33",
   grid: "#e8edf4",
   text: "#5b6b85",
@@ -47,9 +49,16 @@ const CHART_COLORS = {
 
 export default function Dashboard() {
   const [days, setDays] = useState(30);
+  const [, setLocation] = useLocation();
+  const utils = trpc.useUtils();
   const { data, isLoading, isError } = trpc.dashboard.summary.useQuery();
-  const from = useMemo(() => Date.now() - days * 86_400_000, [days]);
-  const { data: cashFlow } = trpc.dashboard.cashFlow.useQuery({ from, to: Date.now() });
+  // O período precisa ser fixo por seleção: usar Date.now() direto na consulta
+  // criava uma consulta nova a cada redesenho (loop infinito de requisições).
+  const period = useMemo(() => {
+    const to = Date.now();
+    return { from: to - days * 86_400_000, to };
+  }, [days]);
+  const { data: cashFlow } = trpc.dashboard.cashFlow.useQuery(period);
 
   return (
     <DashboardLayout>
@@ -87,7 +96,7 @@ export default function Dashboard() {
         </div>
 
         {isLoading && <LoadingCard rows={4} />}
-        {isError && <ErrorState />}
+        {isError && <ErrorState retry={() => utils.dashboard.invalidate()} />}
 
         {data && (
           <>
@@ -162,11 +171,9 @@ export default function Dashboard() {
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart
                         data={(cashFlow ?? []).map((d) => ({
-                          ...d,
-                          date: new Date(`${d.date}T12:00:00`).toLocaleDateString("pt-BR", {
-                            day: "2-digit",
-                            month: "short",
-                          }),
+                          date: d.date,
+                          receita: Number(d.income),
+                          despesa: Number(d.expense),
                         }))}
                       >
                         <defs>
@@ -179,27 +186,31 @@ export default function Dashboard() {
                             <stop offset="100%" stopColor={CHART_COLORS.despesa} stopOpacity={0.02} />
                           </linearGradient>
                         </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.grid} vertical={false} />
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} vertical={false} />
                         <XAxis
                           dataKey="date"
-                          tick={{ fontSize: 11, fill: CHART_COLORS.text }}
+                          tick={chartTheme.axis}
+                          tickFormatter={chartDate}
+                          minTickGap={16}
                           tickLine={false}
                           axisLine={false}
                         />
                         <YAxis
-                          tickFormatter={(v) => `${(Number(v) / 100).toLocaleString("pt-BR")}`}
-                          tick={{ fontSize: 11, fill: CHART_COLORS.text }}
+                          tickFormatter={chartMoney}
+                          tick={chartTheme.axis}
                           tickLine={false}
                           axisLine={false}
-                          width={64}
+                          width={76}
                         />
                         <RTooltip
                           formatter={(value: number, name: string) => [
                             formatBRL(value),
                             name === "receita" ? "Receitas" : "Despesas",
                           ]}
-                          labelStyle={{ color: CHART_COLORS.text, fontSize: 12 }}
-                          contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12 }}
+                          labelFormatter={(v) => chartDate(String(v))}
+                          labelStyle={chartTheme.tooltip.labelStyle}
+                          itemStyle={chartTheme.tooltip.itemStyle}
+                          contentStyle={chartTheme.tooltip.contentStyle}
                         />
                         <Area
                           type="monotone"
@@ -236,23 +247,25 @@ export default function Dashboard() {
                       value: Number(s.count ?? 0),
                     }))}
                   >
-                        <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.grid} vertical={false} />
+                        <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} vertical={false} />
                         <XAxis
                           dataKey="label"
-                          tick={{ fontSize: 10, fill: CHART_COLORS.text }}
+                          tick={{ ...chartTheme.axis, fontSize: 10 }}
                           tickLine={false}
                           axisLine={false}
                         />
                         <YAxis
                           allowDecimals={false}
-                          tick={{ fontSize: 11, fill: CHART_COLORS.text }}
+                          tick={chartTheme.axis}
                           tickLine={false}
                           axisLine={false}
                           width={28}
                         />
                         <RTooltip
-                          cursor={{ fill: "rgba(15,42,77,0.05)" }}
-                          contentStyle={{ borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 12 }}
+                          cursor={chartTheme.tooltip.cursor}
+                          labelStyle={chartTheme.tooltip.labelStyle}
+                          itemStyle={chartTheme.tooltip.itemStyle}
+                          contentStyle={chartTheme.tooltip.contentStyle}
                         />
                         <Bar dataKey="value" fill={CHART_COLORS.receita} radius={[6, 6, 0, 0]} />
                       </BarChart>
@@ -281,7 +294,7 @@ export default function Dashboard() {
                     <EmptyState
                       title="Nenhuma OS ainda"
                       description="Crie a primeira ordem de serviço para começar a operar."
-                      action={() => (window.location.href = "/os")}
+                      action={() => setLocation("/os/nova")}
                       actionLabel="Criar OS"
                       icon={<Wrench className="h-6 w-6" />}
                     />

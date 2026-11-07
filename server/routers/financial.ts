@@ -5,26 +5,14 @@ import {
   cashFlow,
   createFinancialTransaction,
   deleteFinancialTransaction,
+  getFinancialTransaction,
   listFinancialTransactions,
   updateFinancialTransaction,
 } from "../db";
+import { idInput, searchInput, transactionInput } from "../validation";
 
-const transactionInput = z.object({
-  description: z.string().min(1, "Informe a descrição").max(500),
-  category: z.string().max(160).optional().nullable(),
-  type: z.enum(["receita", "despesa"]),
-  amount: z.number().int().min(1, "Valor deve ser maior que zero"),
-  dueAt: z.number().int().positive("Informe a data de vencimento"),
-  status: z.enum(["pendente", "pago", "cancelado", "atrasado"]).default("pendente"),
-  paidAt: z.number().int().optional().nullable(),
-  paymentMethod: z
-    .enum(["dinheiro", "pix", "cartao_credito", "cartao_debito", "transferencia", "boleto", "outros"])
-    .optional()
-    .nullable(),
-  sourceType: z.enum(["manual", "ordem_servico", "automatico"]).optional().nullable(),
-  sourceId: z.number().int().positive().optional().nullable(),
-  notes: z.string().optional().nullable(),
-});
+const OS_LOCK_MESSAGE =
+  "Este lançamento foi gerado automaticamente pela OS. Para alterá-lo, reabra ou cancele a OS.";
 
 export const financialRouter = router({
   list: protectedProcedure
@@ -35,8 +23,8 @@ export const financialRouter = router({
           status: z.enum(["pendente", "pago", "cancelado", "atrasado"]).optional(),
           from: z.number().int().optional(),
           to: z.number().int().optional(),
-          search: z.string().optional(),
-          page: z.number().int().min(1).optional(),
+          search: searchInput,
+          page: z.number().int().min(1).max(10_000).optional(),
           limit: z.number().int().min(1).max(100).optional(),
         })
         .optional()
@@ -45,50 +33,63 @@ export const financialRouter = router({
 
   cashFlow: protectedProcedure
     .input(z.object({ from: z.number().int().positive(), to: z.number().int().positive() }))
-    .query(({ input }) => cashFlow(input)),
+    .query(({ input }) => {
+      if (input.to < input.from) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "A data final deve ser depois da inicial" });
+      }
+      return cashFlow(input);
+    }),
 
   create: protectedProcedure.input(transactionInput).mutation(async ({ input }) => {
     const now = Date.now();
-    let data = input;
-    if (input.status === "pago" && !input.paidAt) {
-      data = { ...input, paidAt: now };
-    }
+    // Regra: lançamentos manuais nunca se passam por lançamentos de OS.
+    const data = { ...input, sourceType: "manual" as const, sourceId: null };
+    if (data.status === "pago") data.paidAt = now;
+    else data.paidAt = null;
     return createFinancialTransaction(data);
   }),
 
   update: protectedProcedure
-    .input(transactionInput.merge(z.object({ id: z.number().int().positive() })))
+    .input(transactionInput.extend({ id: z.number().int().positive() }))
     .mutation(async ({ input }) => {
       const { id, ...data } = input;
-      if (data.status === "pago" && !data.paidAt) {
-        data.paidAt = Date.now();
+      const existing = await getFinancialTransaction(id);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Lançamento não encontrado" });
+      if (existing.sourceType === "ordem_servico") {
+        throw new TRPCError({ code: "FORBIDDEN", message: OS_LOCK_MESSAGE });
       }
-      if (data.status !== "pago") {
-        data.paidAt = null;
+      const next = { ...data, sourceType: existing.sourceType, sourceId: existing.sourceId };
+      if (next.status === "pago") {
+        // Mantém a data original do pagamento se já estava pago.
+        next.paidAt = existing.status === "pago" && existing.paidAt ? existing.paidAt : Date.now();
+      } else {
+        next.paidAt = null;
       }
-      return updateFinancialTransaction(id, data);
+      return updateFinancialTransaction(id, next);
     }),
 
-  markPaid: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
-    .mutation(async ({ input }) => {
-      return updateFinancialTransaction(input.id, { status: "pago", paidAt: Date.now() });
-    }),
+  markPaid: protectedProcedure.input(idInput).mutation(async ({ input }) => {
+    const existing = await getFinancialTransaction(input.id);
+    if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Lançamento não encontrado" });
+    if (existing.status === "pago") {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Este lançamento já está pago" });
+    }
+    if (existing.status === "cancelado") {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Lançamentos cancelados não podem ser marcados como pagos",
+      });
+    }
+    return updateFinancialTransaction(input.id, { status: "pago", paidAt: Date.now() });
+  }),
 
-  delete: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
-    .mutation(async ({ input }) => {
-      const all = await listFinancialTransactions({ limit: 10000, page: 1 });
-      const exists = all.rows.find((t) => t.id === input.id);
-      if (!exists) throw new TRPCError({ code: "NOT_FOUND", message: "Lançamento não encontrado" });
-      if (exists.sourceType === "ordem_servico") {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message:
-            "Este lançamento foi gerado automaticamente pela OS e não pode ser excluído manualmente",
-        });
-      }
-      await deleteFinancialTransaction(input.id);
-      return { success: true };
-    }),
+  delete: protectedProcedure.input(idInput).mutation(async ({ input }) => {
+    const exists = await getFinancialTransaction(input.id);
+    if (!exists) throw new TRPCError({ code: "NOT_FOUND", message: "Lançamento não encontrado" });
+    if (exists.sourceType === "ordem_servico") {
+      throw new TRPCError({ code: "FORBIDDEN", message: OS_LOCK_MESSAGE });
+    }
+    await deleteFinancialTransaction(input.id);
+    return { success: true };
+  }),
 });

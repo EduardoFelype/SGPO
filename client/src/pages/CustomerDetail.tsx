@@ -49,7 +49,7 @@ export default function CustomerDetail() {
           <Button
             variant="outline"
             className="bg-navy hover:bg-navy-deep text-primary-foreground border-transparent"
-            onClick={() => setLocation("/veiculos?novo=1")}
+            onClick={() => setLocation(`/veiculos?novo=1&cliente=${c.id}`)}
           >
             <Car className="h-4 w-4" /> Novo veículo
           </Button>

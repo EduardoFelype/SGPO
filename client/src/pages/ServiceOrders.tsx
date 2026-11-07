@@ -18,7 +18,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatBRL, formatDateTime, OS_STATUS_LABEL } from "@/lib/format";
+import { formatBRL, formatDate, formatDateTime, OS_STATUS_LABEL } from "@/lib/format";
+import { LIMITS } from "@shared/limits";
 import { trpc } from "@/lib/trpc";
 import { FilePlus2, Loader2, Search } from "lucide-react";
 import { useState } from "react";
@@ -62,24 +63,34 @@ export default function ServiceOrders() {
     limit: 50,
   } as const);
 
+  const isFiltered = Boolean(search || status);
+  /** Sem nenhuma OS e sem filtro: o botão de criar fica só no aviso central. */
+  const isFirstUse = !isLoading && !isError && !isFiltered && (data?.total ?? 0) === 0;
+  const clearFilters = () => {
+    setSearch("");
+    setSearchInput("");
+    setStatus("");
+  };
+
   return (
     <DashboardLayout>
       <PageHeader
         title="Ordens de Serviço"
         subtitle={`${data?.total ?? ""} ${data?.total === 1 ? "ordem de serviço" : "ordens de serviço"}`}
-        action
+        action={!isFirstUse}
         actionLabel="Nova OS"
         onAction={() => setLocation("/os/nova")}
       />
 
       <div className="flex flex-wrap gap-3 mb-4">
-        <div className="relative min-w-64">
+        <div className="relative min-w-64 flex-1 max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             value={searchInput}
+            maxLength={LIMITS.search}
             onChange={(e) => setSearchInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput)}
-            placeholder="Buscar por nº da OS"
+            onKeyDown={(e) => e.key === "Enter" && setSearch(searchInput.trim())}
+            placeholder="Buscar por nº da OS, cliente ou placa"
             className="pl-9"
           />
           {search && (
@@ -96,7 +107,7 @@ export default function ServiceOrders() {
             </Button>
           )}
         </div>
-        <Select value={status} onValueChange={(v) => setStatus((v === "todos" ? "" : v) as typeof status)}>
+        <Select value={status || "todos"} onValueChange={(v) => setStatus((v === "todos" ? "" : v) as typeof status)}>
           <SelectTrigger className="w-48">
             <SelectValue placeholder="Todos os status" />
           </SelectTrigger>
@@ -116,10 +127,16 @@ export default function ServiceOrders() {
 
       {!isLoading && !isError && (data?.rows.length ?? 0) === 0 && (
         <EmptyState
-          title="Nenhuma ordem de serviço encontrada"
-          description="Crie uma nova OS para registrar serviços e peças aplicadas a um veículo."
-          action={() => setLocation("/os/nova")}
+          title={isFiltered ? "Nenhuma OS encontrada" : "Nenhuma ordem de serviço ainda"}
+          description={
+            isFiltered
+              ? "Nenhuma OS corresponde à busca ou ao status escolhido."
+              : "Crie uma nova OS para registrar serviços e peças aplicadas a um veículo."
+          }
+          action={isFiltered ? undefined : () => setLocation("/os/nova")}
           actionLabel="Criar OS"
+          secondaryAction={isFiltered ? clearFilters : undefined}
+          secondaryLabel="Limpar filtros"
           icon={<FilePlus2 className="h-6 w-6" />}
         />
       )}
@@ -133,9 +150,10 @@ export default function ServiceOrders() {
                 <TableHead>Cliente</TableHead>
                 <TableHead>Veículo</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Abertura</TableHead>
-                <TableHead>Previsão</TableHead>
+                <TableHead className="hidden xl:table-cell">Abertura</TableHead>
+                <TableHead className="hidden lg:table-cell">Previsão</TableHead>
                 <TableHead className="text-right">Valor</TableHead>
+                <TableHead className="w-24" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -146,29 +164,29 @@ export default function ServiceOrders() {
                   onClick={() => setLocation(`/os/${os.id}`)}
                 >
                   <TableCell>
-                    <span className="font-display font-bold tracking-wide text-navy">
-                      #{os.number}
+                    <span className="font-display font-bold tracking-wide text-navy whitespace-nowrap">
+                      {os.number}
                     </span>
                   </TableCell>
                   <TableCell>{os.customerName ?? "—"}</TableCell>
-                  <TableCell>
-                    <span className="font-medium">{os.vehiclePlate ?? "—"}</span>
+                  <TableCell className="max-w-56">
+                    <p className="font-medium tracking-wide">{os.vehiclePlate ?? "—"}</p>
                     {os.vehicleModel ? (
-                      <span className="text-xs text-muted-foreground ml-1">
+                      <p className="text-xs text-muted-foreground truncate" title={os.vehicleModel}>
                         {os.vehicleModel}
-                      </span>
+                      </p>
                     ) : null}
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={os.status} kind="os" />
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap hidden xl:table-cell">
                     {formatDateTime(os.openedAt)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
-                    {os.predictedAt ? formatDateTime(os.predictedAt) : "—"}
+                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap hidden lg:table-cell">
+                    {os.predictedAt ? formatDate(os.predictedAt) : "—"}
                   </TableCell>
-                  <TableCell className="text-right font-medium">
+                  <TableCell className="text-right font-medium tabular-nums whitespace-nowrap">
                     {formatBRL(os.totalAmount)}
                   </TableCell>
                   <TableCell className="text-right">
@@ -201,7 +219,7 @@ export default function ServiceOrders() {
         title="Cancelar ordem de serviço?"
         description={
           cancelTarget
-            ? `A OS ${cancelTarget.number} será cancelada e não poderá ser reaberta. Essa ação não pode ser desfeita.`
+            ? `A OS ${cancelTarget.number} será cancelada e não poderá mais ser editada. Se precisar, ela pode ser reaberta depois na tela de detalhes.`
             : undefined
         }
         onConfirm={() => {

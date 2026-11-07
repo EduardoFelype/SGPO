@@ -131,27 +131,39 @@ export function StatCard({
 
 /* ----------------------------- StatusBadge ---------------------------- */
 
+/** Cores dos selos — cada uma com versão para o tema escuro. */
+const TONE = {
+  sky: "bg-sky-100 text-sky-700 border-sky-200 dark:bg-sky-500/15 dark:text-sky-300 dark:border-sky-500/30",
+  violet: "bg-violet-100 text-violet-700 border-violet-200 dark:bg-violet-500/15 dark:text-violet-300 dark:border-violet-500/30",
+  amber: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-500/15 dark:text-amber-300 dark:border-amber-500/30",
+  orange: "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-500/15 dark:text-orange-300 dark:border-orange-500/30",
+  blue: "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-500/15 dark:text-blue-300 dark:border-blue-500/30",
+  emerald: "bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30",
+  red: "bg-red-100 text-red-700 border-red-200 dark:bg-red-500/15 dark:text-red-300 dark:border-red-500/30",
+  gray: "bg-gray-100 text-gray-600 border-gray-200 dark:bg-white/5 dark:text-gray-400 dark:border-white/10",
+};
+
 const OS_STATUS_STYLES: Record<string, string> = {
-  aberta: "bg-sky-100 text-sky-700 border-sky-200",
-  em_analise: "bg-violet-100 text-violet-700 border-violet-200",
-  aguardando_aprovacao: "bg-amber-100 text-amber-700 border-amber-200",
-  aguardando_peca: "bg-orange-100 text-orange-700 border-orange-200",
-  em_andamento: "bg-blue-100 text-blue-700 border-blue-200",
-  concluida: "bg-emerald-100 text-emerald-700 border-emerald-200",
-  cancelada: "bg-gray-100 text-gray-500 border-gray-200 line-through decoration-1",
+  aberta: TONE.sky,
+  em_analise: TONE.violet,
+  aguardando_aprovacao: TONE.amber,
+  aguardando_peca: TONE.orange,
+  em_andamento: TONE.blue,
+  concluida: TONE.emerald,
+  cancelada: `${TONE.gray} line-through decoration-1`,
 };
 
 const FIN_STATUS_STYLES: Record<string, string> = {
-  pendente: "bg-amber-100 text-amber-700 border-amber-200",
-  pago: "bg-emerald-100 text-emerald-700 border-emerald-200",
-  cancelado: "bg-gray-100 text-gray-500 border-gray-200",
-  atrasado: "bg-red-100 text-red-700 border-red-200",
+  pendente: TONE.amber,
+  pago: TONE.emerald,
+  cancelado: TONE.gray,
+  atrasado: TONE.red,
 };
 
 const STOCK_TYPE_STYLES: Record<string, string> = {
-  entrada: "bg-emerald-100 text-emerald-700 border-emerald-200",
-  saida: "bg-orange-100 text-orange-700 border-orange-200",
-  ajuste: "bg-gray-100 text-gray-600 border-gray-200",
+  entrada: TONE.emerald,
+  saida: TONE.orange,
+  ajuste: TONE.gray,
 };
 
 export function StatusBadge({
@@ -182,37 +194,53 @@ export function StatusBadge({
 
 /* ------------------------------- EmptyState --------------------------- */
 
+/**
+ * Lista vazia. Use `action` só quando a página ainda não mostra o mesmo botão no topo
+ * (ex.: primeira vez, sem cadastro). Com busca/filtro ativo, use `secondaryAction` para limpar.
+ */
 export function EmptyState({
   title,
   description,
   action,
   actionLabel = "Começar agora",
+  secondaryAction,
+  secondaryLabel = "Limpar busca",
   icon,
 }: {
   title: string;
   description?: string;
   action?: () => void;
   actionLabel?: string;
+  secondaryAction?: () => void;
+  secondaryLabel?: string;
   icon?: React.ReactNode;
 }) {
   return (
     <div className="rounded-xl border border-dashed bg-card/60 py-14 px-6 flex flex-col items-center justify-center text-center gap-3">
-      <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center text-muted-foreground">
+      <div className="h-14 w-14 rounded-2xl bg-accent/60 ring-1 ring-border flex items-center justify-center text-muted-foreground">
         {icon ?? <Inbox className="h-6 w-6" />}
       </div>
-      <h3 className="font-medium text-foreground">{title}</h3>
+      <h3 className="font-display font-semibold text-foreground">{title}</h3>
       {description && (
         <p className="text-sm text-muted-foreground max-w-sm">{description}</p>
       )}
-      {action && (
-        <Button
-          onClick={action}
-          variant="outline"
-          className="mt-2 bg-navy hover:bg-navy-deep text-primary-foreground border-transparent"
-        >
-          <Plus className="h-4 w-4" />
-          {actionLabel}
-        </Button>
+      {(action || secondaryAction) && (
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+          {action && (
+            <Button
+              onClick={action}
+              className="bg-navy hover:bg-navy-deep text-primary-foreground shadow-soft"
+            >
+              <Plus className="h-4 w-4" />
+              {actionLabel}
+            </Button>
+          )}
+          {secondaryAction && (
+            <Button onClick={secondaryAction} variant="outline">
+              {secondaryLabel}
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );

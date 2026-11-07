@@ -18,6 +18,9 @@ export function LoginScreen() {
   const refreshSession = async () => {
     await utils.auth.me.invalidate();
     await utils.auth.setupStatus.invalidate();
+    // As telas já tentaram carregar dados antes do login (e falharam por falta de sessão):
+    // recarrega tudo para não ficar o aviso "Ocorreu um erro" até o usuário atualizar a página.
+    await utils.invalidate();
   };
 
   const login = trpc.auth.login.useMutation({ onSuccess: refreshSession });

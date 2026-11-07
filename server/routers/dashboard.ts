@@ -11,6 +11,16 @@ import {
   markAllNotificationsRead,
   updateWorkshop,
 } from "../db";
+import {
+  LIMITS,
+  UF_LIST,
+  isValidCEP,
+  isValidCNPJ,
+  isValidEmail,
+  isValidPhone,
+  onlyDigits,
+} from "@shared/limits";
+import { optionalText, requiredText } from "../validation";
 
 export const dashboardRouter = router({
   summary: protectedProcedure.query(() => getDashboardSummary()),
@@ -104,17 +114,53 @@ export const workshopRouter = router({
   update: protectedProcedure
     .input(
       z.object({
-        name: z.string().min(1).max(255),
-        cnpj: z.string().max(20).optional().nullable(),
-        phone: z.string().max(30).optional().nullable(),
-        whatsapp: z.string().max(30).optional().nullable(),
-        email: z.string().email("E-mail inválido").max(320).optional().nullable(),
-        address: z.string().max(500).optional().nullable(),
-        number: z.string().max(30).optional().nullable(),
-        neighborhood: z.string().max(200).optional().nullable(),
-        city: z.string().max(200).optional().nullable(),
-        stateCode: z.string().max(2).optional().nullable(),
-        zipCode: z.string().max(12).optional().nullable(),
+        name: requiredText("Nome da oficina", LIMITS.nameMax, 2),
+        cnpj: z
+          .string()
+          .transform(onlyDigits)
+          .refine((v) => v === "" || isValidCNPJ(v), "CNPJ inválido")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
+        phone: z
+          .string()
+          .transform(onlyDigits)
+          .refine((v) => v === "" || isValidPhone(v), "Telefone inválido")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
+        whatsapp: z
+          .string()
+          .transform(onlyDigits)
+          .refine((v) => v === "" || isValidPhone(v), "WhatsApp inválido")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
+        email: z
+          .string()
+          .transform((v) => v.trim().toLowerCase())
+          .refine((v) => v === "" || (isValidEmail(v) && v.length <= LIMITS.email), "E-mail inválido")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
+        address: optionalText("Endereço", LIMITS.address),
+        number: optionalText("Número", LIMITS.addressNumber),
+        neighborhood: optionalText("Bairro", LIMITS.neighborhood),
+        city: optionalText("Cidade", LIMITS.city),
+        stateCode: z
+          .string()
+          .transform((v) => v.trim().toUpperCase())
+          .refine((v) => v === "" || (UF_LIST as readonly string[]).includes(v), "UF inválida")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
+        zipCode: z
+          .string()
+          .transform(onlyDigits)
+          .refine((v) => v === "" || isValidCEP(v), "CEP deve ter 8 dígitos")
+          .transform((v) => (v === "" ? null : v))
+          .optional()
+          .nullable(),
       })
     )
     .mutation(({ input }) => updateWorkshop(input)),

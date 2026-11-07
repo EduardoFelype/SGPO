@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, gte, like, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, like, lte, ne, or, sql } from "drizzle-orm";
 import { count } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import { DAY_MS, LIMITS, startOfDay } from "@shared/limits";
 import {
   customers,
   financialTransactions,
@@ -211,8 +212,19 @@ export async function listCustomers(params: {
   const offset = (page - 1) * limit;
 
   const search = (params.search ?? "").trim();
+  const digits = search.replace(/\D/g, "");
   const baseFilter = search
-    ? like(customers.name, `%${search}%`)
+    ? or(
+        like(customers.name, `%${search}%`),
+        like(customers.email, `%${search}%`),
+        ...(digits.length >= 3
+          ? [
+              like(customers.document, `%${digits}%`),
+              like(customers.phone, `%${digits}%`),
+              like(customers.whatsapp, `%${digits}%`),
+            ]
+          : [])
+      )
     : undefined;
 
   const totalRow = await db
@@ -271,6 +283,36 @@ export async function getCustomer(id: number): Promise<Customer | undefined> {
   return rows[0];
 }
 
+/** Cliente com o mesmo CPF/CNPJ (ignorando o próprio registro na edição). */
+export async function findCustomerByDocument(
+  document: string,
+  exceptId?: number
+): Promise<Customer | undefined> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db
+    .select()
+    .from(customers)
+    .where(
+      and(eq(customers.document, document), exceptId ? ne(customers.id, exceptId) : undefined)
+    )
+    .limit(1);
+  return rows[0];
+}
+
+/** Quantidade de OS vinculadas a um cliente ou veículo (regras de exclusão). */
+export async function countServiceOrders(filter: { customerId?: number; vehicleId?: number }) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const where = filter.customerId
+    ? eq(serviceOrders.customerId, filter.customerId)
+    : filter.vehicleId
+      ? eq(serviceOrders.vehicleId, filter.vehicleId)
+      : undefined;
+  const rows = await db.select({ count: sql<number>`count(*)` }).from(serviceOrders).where(where);
+  return Number(rows[0]?.count ?? 0);
+}
+
 /** Perfil do cliente: veículos, contagem e totais de OS */
 export async function getCustomerProfile(id: number) {
   const db = await getDb();
@@ -321,26 +363,60 @@ export async function listVehicles(params: {
   const limit = Math.min(params.limit ?? 20, 100);
   const offset = (page - 1) * limit;
 
-  const search = (params.search ?? "").trim().toUpperCase();
+  const search = (params.search ?? "").trim();
+  const plateSearch = search.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const plateFilter = search
-    ? like(vehicles.plate, `%${search}%`)
+    ? or(
+        plateSearch ? like(vehicles.plate, `%${plateSearch}%`) : undefined,
+        like(vehicles.brand, `%${search}%`),
+        like(vehicles.model, `%${search}%`),
+        like(customers.name, `%${search}%`)
+      )
     : undefined;
 
   const totalRow = await db
     .select({ count: sql<number>`count(*)` })
     .from(vehicles)
+    .leftJoin(customers, eq(vehicles.customerId, customers.id))
     .where(plateFilter);
   const total = Number(totalRow[0]?.count ?? 0);
 
   const rows = await db
-    .select()
+    .select({
+      id: vehicles.id,
+      customerId: vehicles.customerId,
+      plate: vehicles.plate,
+      brand: vehicles.brand,
+      model: vehicles.model,
+      year: vehicles.year,
+      color: vehicles.color,
+      fuel: vehicles.fuel,
+      mileage: vehicles.mileage,
+      notes: vehicles.notes,
+      createdAt: vehicles.createdAt,
+      updatedAt: vehicles.updatedAt,
+      customerName: customers.name,
+    })
     .from(vehicles)
+    .leftJoin(customers, eq(vehicles.customerId, customers.id))
     .where(plateFilter)
     .orderBy(desc(vehicles.createdAt))
     .limit(limit)
     .offset(offset);
 
   return { rows, total, page, limit };
+}
+
+/** Veículo com a mesma placa (ignorando o próprio registro na edição). */
+export async function findVehicleByPlate(plate: string, exceptId?: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db
+    .select()
+    .from(vehicles)
+    .where(and(eq(vehicles.plate, plate), exceptId ? ne(vehicles.id, exceptId) : undefined))
+    .limit(1);
+  return rows[0];
 }
 
 export async function createVehicle(data: InsertVehicle): Promise<typeof vehicles.$inferSelect> {
@@ -434,9 +510,14 @@ export async function listServiceOrders(params: {
   const offset = (page - 1) * limit;
 
   const statusFilter = params.status ? eq(serviceOrders.status, params.status) : undefined;
-  const search = (params.search ?? "").trim().toUpperCase();
+  const search = (params.search ?? "").trim();
+  const plateSearch = search.toUpperCase().replace(/[^A-Z0-9]/g, "");
   const searchFilter = search
-    ? like(serviceOrders.number, `%${search}%`)
+    ? or(
+        like(serviceOrders.number, `%${search.toUpperCase()}%`),
+        like(customers.name, `%${search}%`),
+        plateSearch ? like(vehicles.plate, `%${plateSearch}%`) : undefined
+      )
     : undefined;
 
   const where = and(statusFilter, searchFilter) ?? undefined;
@@ -444,6 +525,8 @@ export async function listServiceOrders(params: {
   const totalRow = await db
     .select({ count: sql<number>`count(*)` })
     .from(serviceOrders)
+    .leftJoin(customers, eq(serviceOrders.customerId, customers.id))
+    .leftJoin(vehicles, eq(serviceOrders.vehicleId, vehicles.id))
     .where(where);
   const total = Number(totalRow[0]?.count ?? 0);
 
@@ -537,6 +620,79 @@ export type PartialProductItem = {
   discount?: number;
 };
 
+/** Soma dos itens da OS em centavos (serviços + peças − descontos). */
+export function computeServiceOrderTotal(
+  services: PartialServiceItem[],
+  osProducts: PartialProductItem[]
+): number {
+  const servicesTotal = services.reduce((acc, s) => acc + (s.quantity ?? 1) * s.unitPrice, 0);
+  const productsTotal = osProducts.reduce(
+    (acc, p) => acc + Math.max(0, (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0)),
+    0
+  );
+  return servicesTotal + productsTotal;
+}
+
+/**
+ * Regras comuns de criação/edição da OS:
+ * - o veículo precisa pertencer ao cliente informado;
+ * - a OS precisa ter ao menos um item com valor;
+ * - o total não pode ultrapassar o limite;
+ * - peças do estoque precisam existir.
+ */
+async function assertServiceOrderRules(
+  db: ReturnType<typeof drizzle>,
+  data: {
+    customerId: number;
+    vehicleId: number;
+    services: PartialServiceItem[];
+    products: PartialProductItem[];
+  }
+) {
+  const [vehicle] = await db
+    .select({ id: vehicles.id, customerId: vehicles.customerId, mileage: vehicles.mileage })
+    .from(vehicles)
+    .where(eq(vehicles.id, data.vehicleId))
+    .limit(1);
+  if (!vehicle) throw new Error("Veículo não encontrado");
+  if (vehicle.customerId !== data.customerId) {
+    throw new Error("O veículo selecionado não pertence a este cliente");
+  }
+
+  const hasValue =
+    data.services.some((s) => s.unitPrice > 0) || data.products.some((p) => p.unitPrice > 0);
+  if (!hasValue) throw new Error("Adicione pelo menos um serviço ou peça com valor");
+
+  const total = computeServiceOrderTotal(data.services, data.products);
+  if (total > LIMITS.osTotalMaxCents) {
+    throw new Error("O total da OS ultrapassa o limite permitido (R$ 9.999.999,99)");
+  }
+
+  const productIds = Array.from(
+    new Set(data.products.map((p) => p.productId).filter((id): id is number => id != null))
+  );
+  for (const productId of productIds) {
+    const [row] = await db
+      .select({ id: products.id })
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1);
+    if (!row) throw new Error("Uma das peças selecionadas não existe mais no estoque");
+  }
+
+  return { vehicle, total };
+}
+
+function assertPrediction(predictedAt: number | null | undefined, openedAt: number) {
+  if (predictedAt == null) return;
+  if (predictedAt < startOfDay(openedAt)) {
+    throw new Error("A previsão de entrega não pode ser anterior à abertura da OS");
+  }
+  if (predictedAt > Date.now() + LIMITS.osPredictionMaxDays * DAY_MS) {
+    throw new Error(`A previsão de entrega deve ser em até ${LIMITS.osPredictionMaxDays} dias`);
+  }
+}
+
 export async function createServiceOrder(data: {
   customerId: number;
   vehicleId: number;
@@ -550,19 +706,21 @@ export async function createServiceOrder(data: {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
 
-  const servicesTotal = data.services.reduce((acc, s) => acc + (s.quantity ?? 1) * s.unitPrice, 0);
-  const productsTotal = data.products.reduce(
-    (acc, p) => acc + (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0),
-    0
-  );
-  const subtotal = servicesTotal + productsTotal;
+  const { vehicle, total: subtotal } = await assertServiceOrderRules(db, data);
+  const openedAt = Date.now();
+  assertPrediction(data.predictedAt, openedAt);
+  if (data.mileage != null && data.mileage < vehicle.mileage) {
+    throw new Error(
+      `A quilometragem informada é menor que a registrada no veículo (${vehicle.mileage.toLocaleString("pt-BR")} km)`
+    );
+  }
 
   const number = await nextServiceOrderNumber();
   const insertResult = await db.insert(serviceOrders).values({
     number,
     customerId: data.customerId,
     vehicleId: data.vehicleId,
-    openedAt: Date.now(),
+    openedAt,
     predictedAt: data.predictedAt,
     mileage: data.mileage,
     diagnostics: data.diagnostics,
@@ -590,7 +748,7 @@ export async function createServiceOrder(data: {
       quantity: p.quantity ?? 1,
       unitPrice: p.unitPrice,
       discount: p.discount ?? 0,
-      total: (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0),
+      total: Math.max(0, (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0)),
     }));
     await db.insert(serviceOrderProducts).values(productValues);
   }
@@ -604,12 +762,12 @@ export async function createServiceOrder(data: {
     .select()
     .from(serviceOrderServices)
     .where(eq(serviceOrderServices.serviceOrderId, osId));
-  const products = await db
+  const productsRows = await db
     .select()
     .from(serviceOrderProducts)
     .where(eq(serviceOrderProducts.serviceOrderId, osId));
 
-  return { os: created, services, products };
+  return { os: created, services, products: productsRows };
 }
 
 export type InsertServiceOrderService = typeof serviceOrderServices.$inferInsert;
@@ -619,6 +777,11 @@ export type InsertServiceOrderProduct = typeof serviceOrderProducts.$inferInsert
  * Atualiza OS (cabeçalho, serviços e peças), recalculando o total.
  * Executa baixa automática no estoque e gera receita quando o status
  * passa a ser "concluida" (sem duplicar movimentações/lançamentos).
+ *
+ * Regras:
+ * - OS concluída ou cancelada não pode ser editada (é preciso reabrir antes);
+ * - cancelamento só pelo fluxo próprio (cancelServiceOrder);
+ * - conclusão exige estoque suficiente para as peças vinculadas.
  */
 export async function updateServiceOrder(
   id: number,
@@ -630,9 +793,9 @@ export async function updateServiceOrder(
     mileage?: number | null;
     diagnostics?: string | null;
     observations?: string | null;
-  services: PartialServiceItem[];
-  products: PartialProductItem[];
-}
+    services: PartialServiceItem[];
+    products: PartialProductItem[];
+  }
 ) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -644,13 +807,47 @@ export async function updateServiceOrder(
     .limit(1);
   if (!existing) throw new Error("Ordem de serviço não encontrada");
 
-  const wasCompleted = existing.status === "concluida";
-  const becomingCompleted = data.status === "concluida" && !wasCompleted;
+  if (existing.status === "concluida") {
+    throw new Error("Esta OS já foi concluída. Reabra a OS para alterá-la.");
+  }
+  if (existing.status === "cancelada") {
+    throw new Error("Esta OS está cancelada. Reabra a OS para alterá-la.");
+  }
+  if (data.status === "cancelada") {
+    throw new Error("Use a opção Cancelar para cancelar a OS");
+  }
+
+  const customerId = data.customerId ?? existing.customerId;
+  const vehicleId = data.vehicleId ?? existing.vehicleId;
+  const { vehicle, total: subtotal } = await assertServiceOrderRules(db, {
+    customerId,
+    vehicleId,
+    services: data.services,
+    products: data.products,
+  });
+
+  if (data.predictedAt !== undefined && data.predictedAt !== existing.predictedAt) {
+    assertPrediction(data.predictedAt, existing.openedAt);
+  }
+  if (
+    data.mileage != null &&
+    data.mileage !== existing.mileage &&
+    data.mileage < vehicle.mileage
+  ) {
+    throw new Error(
+      `A quilometragem informada é menor que a registrada no veículo (${vehicle.mileage.toLocaleString("pt-BR")} km)`
+    );
+  }
+
+  const becomingCompleted = data.status === "concluida";
+  if (becomingCompleted) {
+    await assertStockAvailable(db, id, data.products);
+  }
 
   const header: Record<string, unknown> = {};
   if (data.status !== undefined) {
     header.status = data.status;
-    if (data.status === "concluida" && !wasCompleted) header.completedAt = Date.now();
+    if (becomingCompleted) header.completedAt = Date.now();
   }
   if (data.customerId !== undefined) header.customerId = data.customerId;
   if (data.vehicleId !== undefined) header.vehicleId = data.vehicleId;
@@ -666,13 +863,6 @@ export async function updateServiceOrder(
   // Reescrever itens
   await db.delete(serviceOrderServices).where(eq(serviceOrderServices.serviceOrderId, id));
   await db.delete(serviceOrderProducts).where(eq(serviceOrderProducts.serviceOrderId, id));
-
-  const servicesTotal = data.services.reduce((acc, s) => acc + (s.quantity ?? 1) * s.unitPrice, 0);
-  const productsTotal = data.products.reduce(
-    (acc, p) => acc + (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0),
-    0
-  );
-  const subtotal = servicesTotal + productsTotal;
 
   if (data.services.length > 0) {
     await db.insert(serviceOrderServices).values(
@@ -694,7 +884,7 @@ export async function updateServiceOrder(
         quantity: p.quantity ?? 1,
         unitPrice: p.unitPrice,
         discount: p.discount ?? 0,
-        total: (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0),
+        total: Math.max(0, (p.quantity ?? 1) * p.unitPrice - (p.discount ?? 0)),
       }))
     );
   }
@@ -703,6 +893,11 @@ export async function updateServiceOrder(
 
   if (becomingCompleted) {
     await completeServiceOrderSideEffects(db, id, data.products, subtotal);
+    // Atualiza a quilometragem do veículo quando a OS registra um valor maior
+    const osMileage = data.mileage ?? existing.mileage;
+    if (osMileage != null && osMileage > vehicle.mileage) {
+      await db.update(vehicles).set({ mileage: osMileage }).where(eq(vehicles.id, vehicleId));
+    }
   }
 
   const [updated] = await db
@@ -714,17 +909,25 @@ export async function updateServiceOrder(
     .select()
     .from(serviceOrderServices)
     .where(eq(serviceOrderServices.serviceOrderId, id));
-  const products = await db
+  const productsRows = await db
     .select()
     .from(serviceOrderProducts)
     .where(eq(serviceOrderProducts.serviceOrderId, id));
 
-  return { os: updated, services, products };
+  return { os: updated, services, products: productsRows };
 }
 
+/** Cancela a OS. Se ela estava concluída, devolve as peças ao estoque e cancela a receita. */
 export async function cancelServiceOrder(id: number) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  const [existing] = await db.select().from(serviceOrders).where(eq(serviceOrders.id, id)).limit(1);
+  if (!existing) throw new Error("Ordem de serviço não encontrada");
+  if (existing.status === "cancelada") throw new Error("Esta OS já está cancelada");
+
+  if (existing.status === "concluida") {
+    await revertServiceOrderSideEffects(db, id);
+  }
   await db
     .update(serviceOrders)
     .set({ status: "cancelada", completedAt: null })
@@ -733,9 +936,19 @@ export async function cancelServiceOrder(id: number) {
   return updated;
 }
 
+/** Reabre uma OS concluída ou cancelada, desfazendo os efeitos da conclusão. */
 export async function reopenServiceOrder(id: number) {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  const [existing] = await db.select().from(serviceOrders).where(eq(serviceOrders.id, id)).limit(1);
+  if (!existing) throw new Error("Ordem de serviço não encontrada");
+  if (existing.status !== "concluida" && existing.status !== "cancelada") {
+    throw new Error("Apenas OS concluídas ou canceladas podem ser reabertas");
+  }
+
+  if (existing.status === "concluida") {
+    await revertServiceOrderSideEffects(db, id);
+  }
   await db
     .update(serviceOrders)
     .set({ status: "em_andamento", completedAt: null })
@@ -744,10 +957,57 @@ export async function reopenServiceOrder(id: number) {
   return updated;
 }
 
+/** Saldo líquido já baixado do estoque por uma OS para um produto (negativo = baixado). */
+async function osStockBalance(db: ReturnType<typeof drizzle>, osId: number, productId: number) {
+  const rows = await db
+    .select({ net: sql<number>`coalesce(sum(${stockMovements.quantity}), 0)` })
+    .from(stockMovements)
+    .where(
+      and(
+        eq(stockMovements.productId, productId),
+        eq(stockMovements.serviceOrderId, osId),
+        eq(stockMovements.reason, "ordem_servico")
+      )
+    );
+  return Number(rows[0]?.net ?? 0);
+}
+
+/** Agrupa as quantidades de peças do estoque por produto. */
+function stockNeeds(osProducts: PartialProductItem[]) {
+  const needs = new Map<number, number>();
+  for (const p of osProducts) {
+    if (p.productId == null) continue;
+    needs.set(p.productId, (needs.get(p.productId) ?? 0) + (p.quantity ?? 1));
+  }
+  return needs;
+}
+
+/** Impede concluir a OS se alguma peça vinculada não tiver estoque suficiente. */
+async function assertStockAvailable(
+  db: ReturnType<typeof drizzle>,
+  osId: number,
+  osProducts: PartialProductItem[]
+) {
+  for (const [productId, qty] of Array.from(stockNeeds(osProducts))) {
+    if ((await osStockBalance(db, osId, productId)) < 0) continue; // já baixado
+    const [row] = await db
+      .select({ name: products.name, quantity: products.quantity, unit: products.unit })
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1);
+    if (!row) throw new Error("Uma das peças selecionadas não existe mais no estoque");
+    if (row.quantity < qty) {
+      throw new Error(
+        `Estoque insuficiente para "${row.name}": disponível ${row.quantity} ${row.unit}, necessário ${qty} ${row.unit}`
+      );
+    }
+  }
+}
+
 /**
  * Efeitos colaterais da conclusão de uma OS:
  * - baixa automática no estoque das peças vinculadas (sem duplicar)
- * - geração de receita financeira (sem duplicar)
+ * - geração de receita financeira (sem duplicar; reaproveita a receita cancelada)
  * - alertas de estoque mínimo com notificações
  */
 async function completeServiceOrderSideEffects(
@@ -757,40 +1017,26 @@ async function completeServiceOrderSideEffects(
   total: number
 ) {
   const now = Date.now();
+  const [osRow] = await db
+    .select({ number: serviceOrders.number })
+    .from(serviceOrders)
+    .where(eq(serviceOrders.id, osId))
+    .limit(1);
+  const osNumber = osRow?.number ?? `OS-${String(osId).padStart(6, "0")}`;
 
-  // Movimentações de estoque: saída por ordem de serviço.
-  // Só registra saída se ainda não houver movimentação de reason='ordem_servico'
-  // para este produto vinculada à mesma OS (evita duplicidade).
-  const productsWithStock = osProducts.filter(
-    (p) => p.productId != null && (p.quantity ?? 0) > 0
-  );
-  for (const p of productsWithStock) {
-    const productId = p.productId as number;
-    const qty = p.quantity ?? 1;
-    const existing = await db
-      .select({ id: stockMovements.id })
-      .from(stockMovements)
-      .where(
-        and(
-          eq(stockMovements.productId, productId),
-          eq(stockMovements.serviceOrderId, osId),
-          eq(stockMovements.reason, "ordem_servico"),
-          eq(stockMovements.type, "saida")
-        )
-      )
-      .limit(1);
-    if (existing.length > 0) continue;
+  for (const [productId, qty] of Array.from(stockNeeds(osProducts))) {
+    // Já existe baixa líquida para esta OS/produto? Então não duplica.
+    if ((await osStockBalance(db, osId, productId)) < 0) continue;
 
-    const productRows = await db
-      .select({ quantity: products.quantity })
+    const [productRow] = await db
+      .select({ quantity: products.quantity, minStock: products.minStock, name: products.name })
       .from(products)
       .where(eq(products.id, productId))
       .limit(1);
-    const currentQty = Number(productRows[0]?.quantity ?? 0);
-    const newQty = Math.max(0, currentQty - qty);
+    if (!productRow) continue;
+    const newQty = Math.max(0, productRow.quantity - qty);
 
     await db.update(products).set({ quantity: newQty }).where(eq(products.id, productId));
-
     await db.insert(stockMovements).values({
       productId,
       type: "saida",
@@ -798,29 +1044,17 @@ async function completeServiceOrderSideEffects(
       balanceAfter: newQty,
       reason: "ordem_servico",
       serviceOrderId: osId,
-      description: `Baixa automática — OS-${String(osId).padStart(6, "0")}`,
+      description: `Baixa automática — ${osNumber}`,
       occurredAt: now,
     });
 
-    // Alerta de estoque mínimo
-    const minRows = await db
-      .select({ minStock: products.minStock, name: products.name })
-      .from(products)
-      .where(eq(products.id, productId))
-      .limit(1);
-    if (minRows[0] && newQty <= minRows[0].minStock) {
-      await createStockNotification(
-        db,
-        minRows[0].name,
-        newQty,
-        minRows[0].minStock,
-        osId
-      );
+    if (newQty <= productRow.minStock) {
+      await createStockNotification(db, productRow.name, newQty, productRow.minStock, osNumber);
     }
   }
 
   // Receita financeira vinculada à OS (sem duplicar)
-  const existingTx = await db
+  const [existingTx] = await db
     .select({ id: financialTransactions.id })
     .from(financialTransactions)
     .where(
@@ -830,9 +1064,14 @@ async function completeServiceOrderSideEffects(
       )
     )
     .limit(1);
-  if (existingTx.length === 0 && total > 0) {
+  if (existingTx) {
+    await db
+      .update(financialTransactions)
+      .set({ amount: total, status: total > 0 ? "pago" : "cancelado", paidAt: now, dueAt: now })
+      .where(eq(financialTransactions.id, existingTx.id));
+  } else if (total > 0) {
     await db.insert(financialTransactions).values({
-      description: `Recebimento — OS-${String(osId).padStart(6, "0")}`,
+      description: `Recebimento — ${osNumber}`,
       category: "Serviços de oficina",
       type: "receita",
       amount: total,
@@ -847,16 +1086,67 @@ async function completeServiceOrderSideEffects(
   }
 }
 
+/** Desfaz a conclusão: devolve as peças ao estoque e cancela a receita automática. */
+async function revertServiceOrderSideEffects(db: ReturnType<typeof drizzle>, osId: number) {
+  const now = Date.now();
+  const [osRow] = await db
+    .select({ number: serviceOrders.number })
+    .from(serviceOrders)
+    .where(eq(serviceOrders.id, osId))
+    .limit(1);
+  const osNumber = osRow?.number ?? `OS-${String(osId).padStart(6, "0")}`;
+
+  const moved = await db
+    .select({ productId: stockMovements.productId })
+    .from(stockMovements)
+    .where(and(eq(stockMovements.serviceOrderId, osId), eq(stockMovements.reason, "ordem_servico")));
+  const productIds = Array.from(new Set(moved.map((m) => m.productId)));
+
+  for (const productId of productIds) {
+    const net = await osStockBalance(db, osId, productId);
+    if (net >= 0) continue; // nada a devolver
+    const [productRow] = await db
+      .select({ quantity: products.quantity })
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1);
+    if (!productRow) continue;
+    const returned = -net;
+    const newQty = productRow.quantity + returned;
+    await db.update(products).set({ quantity: newQty }).where(eq(products.id, productId));
+    await db.insert(stockMovements).values({
+      productId,
+      type: "entrada",
+      quantity: returned,
+      balanceAfter: newQty,
+      reason: "ordem_servico",
+      serviceOrderId: osId,
+      description: `Estorno da baixa — ${osNumber}`,
+      occurredAt: now,
+    });
+  }
+
+  await db
+    .update(financialTransactions)
+    .set({ status: "cancelado", paidAt: null })
+    .where(
+      and(
+        eq(financialTransactions.sourceType, "ordem_servico"),
+        eq(financialTransactions.sourceId, osId)
+      )
+    );
+}
+
 async function createStockNotification(
   db: ReturnType<typeof drizzle>,
   productName: string,
   qty: number,
   minStock: number,
-  osId: number
+  osNumber: string
 ) {
   await db.insert(notifications).values({
     title: "Estoque mínimo atingido",
-    message: `O produto "${productName}" está com ${qty} unidades em estoque (mínimo: ${minStock}), após a baixa da OS-${String(osId).padStart(6, "0")}.`,
+    message: `O produto "${productName}" está com ${qty} unidades em estoque (mínimo: ${minStock}), após a baixa da ${osNumber}.`,
     type: "estoque",
     read: 0,
   });
@@ -879,7 +1169,14 @@ export async function listProducts(params: {
   const offset = (page - 1) * limit;
 
   const search = (params.search ?? "").trim();
-  const searchFilter = search ? like(products.name, `%${search}%`) : undefined;
+  const searchFilter = search
+    ? or(
+        like(products.name, `%${search}%`),
+        like(products.code, `%${search}%`),
+        like(products.brand, `%${search}%`),
+        like(products.supplier, `%${search}%`)
+      )
+    : undefined;
   const categoryFilter = params.category
     ? eq(products.category, params.category)
     : undefined;
@@ -922,6 +1219,40 @@ export async function createProduct(data: InsertProduct): Promise<Product> {
   return created;
 }
 
+export async function getProduct(id: number): Promise<Product | undefined> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db.select().from(products).where(eq(products.id, id)).limit(1);
+  return rows[0];
+}
+
+/** Produto com o mesmo código (ignorando o próprio registro na edição). */
+export async function findProductByCode(code: string, exceptId?: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db
+    .select()
+    .from(products)
+    .where(and(eq(products.code, code), exceptId ? ne(products.id, exceptId) : undefined))
+    .limit(1);
+  return rows[0];
+}
+
+/** Em quantas OS o produto foi usado (impede exclusão e perda de histórico). */
+export async function countProductUsage(productId: number): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db
+    .select({ count: sql<number>`count(distinct ${serviceOrderProducts.serviceOrderId})` })
+    .from(serviceOrderProducts)
+    .where(eq(serviceOrderProducts.productId, productId));
+  return Number(rows[0]?.count ?? 0);
+}
+
+/**
+ * Atualiza o produto. Se a quantidade em estoque mudar pela edição,
+ * registra automaticamente uma movimentação de ajuste (histórico).
+ */
 export async function updateProduct(
   id: number,
   data: Partial<Product>
@@ -933,7 +1264,19 @@ export async function updateProduct(
     createdAt?: Date;
     updatedAt?: Date;
   };
+  const [before] = await db.select().from(products).where(eq(products.id, id)).limit(1);
   await db.update(products).set(rest).where(eq(products.id, id));
+  if (before && rest.quantity !== undefined && rest.quantity !== before.quantity) {
+    await db.insert(stockMovements).values({
+      productId: id,
+      type: "ajuste",
+      quantity: rest.quantity,
+      balanceAfter: rest.quantity,
+      reason: "manual",
+      description: `Ajuste pela edição do produto (de ${before.quantity} para ${rest.quantity})`,
+      occurredAt: Date.now(),
+    });
+  }
   const [updated] = await db.select().from(products).where(eq(products.id, id)).limit(1);
   return updated;
 }
@@ -941,7 +1284,6 @@ export async function updateProduct(
 export async function deleteProduct(id: number): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  await db.delete(serviceOrderProducts).where(eq(serviceOrderProducts.productId, id));
   await db.delete(products).where(eq(products.id, id));
 }
 
@@ -965,12 +1307,23 @@ export async function stockMovement(params: {
   let newQty: number;
   if (params.type === "ajuste") {
     newQty = Math.max(0, params.quantity);
+    if (newQty === product.quantity) {
+      throw new Error(`O estoque de "${product.name}" já é ${product.quantity}. Nada a ajustar.`);
+    }
   } else {
+    if (params.quantity <= 0) throw new Error("Informe uma quantidade maior que zero");
     const delta = params.type === "entrada" ? params.quantity : -params.quantity;
     if (delta < 0 && product.quantity + delta < 0) {
-      throw new Error("Estoque insuficiente para esta saída");
+      throw new Error(
+        `Estoque insuficiente para esta saída: disponível ${product.quantity} ${product.unit}`
+      );
     }
     newQty = Math.max(0, product.quantity + delta);
+  }
+  if (newQty > LIMITS.stockQuantityMax) {
+    throw new Error(
+      `O estoque não pode passar de ${LIMITS.stockQuantityMax.toLocaleString("pt-BR")} ${product.unit}`
+    );
   }
 
   await db.update(products).set({ quantity: newQty }).where(eq(products.id, params.productId));
@@ -1067,7 +1420,14 @@ export async function listFinancialTransactions(params: {
   if (params.status) conditions.push(eq(financialTransactions.status, params.status));
   if (params.from) conditions.push(gte(financialTransactions.dueAt, params.from));
   if (params.to) conditions.push(lte(financialTransactions.dueAt, params.to));
-  if (params.search) conditions.push(like(financialTransactions.description, `%${params.search}%`));
+  if (params.search) {
+    const term = params.search.trim();
+    const cond = or(
+      like(financialTransactions.description, `%${term}%`),
+      like(financialTransactions.category, `%${term}%`)
+    );
+    if (cond) conditions.push(cond);
+  }
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   const totalRow = await db
@@ -1121,6 +1481,17 @@ export async function updateFinancialTransaction(
   return updated;
 }
 
+export async function getFinancialTransaction(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const rows = await db
+    .select()
+    .from(financialTransactions)
+    .where(eq(financialTransactions.id, id))
+    .limit(1);
+  return rows[0];
+}
+
 export async function deleteFinancialTransaction(id: number): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
@@ -1141,11 +1512,18 @@ export async function cashFlow(params: { from: number; to: number }) {
     .where(
       and(
         gte(financialTransactions.dueAt, params.from),
-        lte(financialTransactions.dueAt, params.to)
+        lte(financialTransactions.dueAt, params.to),
+        ne(financialTransactions.status, "cancelado")
       )
     )
-    .groupBy(sql`1`);
-  return rows;
+    .groupBy(sql`1`)
+    .orderBy(sql`1`);
+  // O MySQL devolve somas como texto: converte para número
+  return rows.map((r) => ({
+    date: String(r.date),
+    income: Number(r.income ?? 0),
+    expense: Number(r.expense ?? 0),
+  }));
 }
 
 /* ------------------------------------------------------------------ */
