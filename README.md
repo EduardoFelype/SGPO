@@ -1,116 +1,289 @@
 # SGPO — Sistema de Gestão para Pequenas Oficinas
 
-Sistema web para a operação diária de oficinas mecânicas. O SGPO reúne cadastro de clientes e veículos, ordens de serviço, estoque, financeiro, relatórios e configurações da oficina em uma interface com identidade visual azul-marinho e laranja.
+Sistema web para organizar o dia a dia de oficinas mecânicas de pequeno porte: clientes, veículos, ordens de serviço, estoque de peças, financeiro e relatórios em um só lugar.
+
+---
+
+## Sumário
+
+1. [O que o sistema faz](#o-que-o-sistema-faz)
+2. [O que o sistema não faz](#o-que-o-sistema-não-faz)
+3. [Tecnologias](#tecnologias)
+4. [Como instalar](#como-instalar)
+5. [Como usar](#como-usar)
+6. [Regras de negócio](#regras-de-negócio)
+7. [Comandos úteis](#comandos-úteis)
+8. [Estrutura do projeto](#estrutura-do-projeto)
+9. [Documentação (diagramas)](#documentação-diagramas)
+10. [Problemas comuns](#problemas-comuns)
+
+---
+
+## O que o sistema faz
+
+| Módulo | O que faz |
+|---|---|
+| **Login** | Acesso com usuário e senha. No primeiro acesso, o próprio sistema pede para criar o administrador. Senhas guardadas com criptografia (bcrypt) e sessão por token JWT. |
+| **Dashboard** | Mostra OS abertas e concluídas, receitas, estoque crítico, gráficos (7, 30 e 90 dias) e as últimas ordens de serviço. |
+| **Clientes** | Cadastro de pessoa física (CPF) ou jurídica (CNPJ), com validação do documento, telefone com DDD e endereço preenchido pelo CEP (ViaCEP). Busca, edição e histórico do cliente. |
+| **Veículos** | Cadastro vinculado ao cliente. Marca, modelo e ano são escolhidos da **tabela FIPE**, evitando nomes digitados errados. Placa no padrão antigo ou Mercosul. |
+| **Ordens de serviço (OS)** | Abertura com serviços, peças do estoque, quantidades, valores, desconto e previsão de entrega. Controle de status, fotos do veículo, impressão em PDF e envio pelo WhatsApp. |
+| **Conclusão da OS** | Ao concluir, o sistema baixa as peças do estoque, gera a receita no financeiro e atualiza a quilometragem do veículo — tudo automático. |
+| **Estoque** | Cadastro de peças e insumos, entradas, saídas, ajustes, histórico de movimentações e alerta de estoque mínimo. |
+| **Financeiro** | Contas a pagar e a receber, registro de pagamento, categorias e fluxo de caixa. |
+| **Relatórios** | Relatórios por período, com exportação em CSV, Excel e PDF. |
+| **Configurações** | Dados da oficina (nome, CNPJ, telefone, endereço) usados nas OS impressas. |
+| **Interface** | Tema claro e escuro, layout responsivo (computador, tablet e celular). |
+
+## O que o sistema não faz
+
+Para deixar claro o escopo do projeto, estes recursos **não** fazem parte do SGPO:
+
+- **Não emite nota fiscal** (NF-e / NFS-e) nem se integra com a Receita ou a prefeitura.
+- **Não processa pagamentos**: não cobra cartão, Pix ou boleto; apenas **registra** que um pagamento foi feito.
+- **Não agenda horários** de atendimento para os clientes.
+- **Não envia mensagens automáticas**: o WhatsApp abre com o texto pronto, mas quem envia é o usuário.
+- **Não tem recuperação de senha** ("esqueci minha senha").
+- **Não tem tela para cadastrar outros usuários**: o administrador inicial é criado no primeiro acesso; outros administradores podem ser criados pelo terminal (`pnpm seed:admin`).
+- **Não atende várias oficinas** na mesma instalação: cada instalação é de uma oficina.
+- **Não controla funcionários**, comissões, ponto ou folha de pagamento.
+- **Não funciona sem internet** para buscar a tabela FIPE e o CEP (o restante funciona na rede local).
+- **Não é um aplicativo de celular nativo**: é um sistema web que abre no navegador do celular.
+- **Não faz backup automático** do banco de dados; o backup deve ser feito pelo responsável.
+
+---
 
 ## Tecnologias
 
 | Camada | Tecnologias |
 |---|---|
-| Interface | React 19, TypeScript, Tailwind CSS 4, shadcn/ui, Framer Motion e Recharts |
-| API | Node.js, Express, tRPC 11 e Zod |
-| Persistência | MySQL 8, Drizzle ORM |
-| Segurança | Login local com senha protegida por bcryptjs e sessão JWT HTTP-only |
-| Infraestrutura local | Docker Compose, MySQL e volume persistente para fotos |
+| Interface | React 19, TypeScript, Tailwind CSS 4, shadcn/ui, Recharts |
+| API | Node.js, Express, tRPC 11, Zod |
+| Banco de dados | MySQL 8, Drizzle ORM |
+| Segurança | bcryptjs (senhas) e JWT (sessão) |
+| APIs externas | Tabela FIPE (via BrasilAPI, com a API Parallelum como reserva) e ViaCEP |
+| Infraestrutura | Docker e Docker Compose |
 
-## Funcionalidades
+---
 
-| Módulo | Principais recursos |
-|---|---|
-| Acesso | Primeiro administrador criado pela própria tela de configuração; papéis `admin` e `user`; sessão por cookie seguro. |
-| Dashboard | Indicadores, gráficos e filtros de 7, 30 e 90 dias. |
-| Clientes e veículos | Cadastro, busca, edição, histórico e vínculo entre cliente e veículo. |
-| Ordens de serviço | Serviços, peças, mão de obra, totais, status, impressão e compartilhamento por WhatsApp. Ao concluir uma OS, o estoque e o financeiro são atualizados automaticamente. |
-| Fotos da OS | Anexo, visualização e exclusão de fotos do veículo, persistidas no volume local do Docker. |
-| Estoque | Produtos, entradas, saídas, ajustes, histórico e alertas de estoque mínimo. |
-| Financeiro | Contas a pagar e receber, fluxo de caixa, categorias e status de pagamento. |
-| Relatórios | Filtros por período e exportação em CSV, Excel compatível e PDF. |
-| Interface | Tema claro/escuro persistente e layout responsivo. |
+## Como instalar
 
-## Executar com Docker — recomendado
+Existem duas formas. A **opção 1 (Docker)** é a mais fácil, porque já instala o banco de dados junto.
 
-### Pré-requisitos
+### Opção 1 — Com Docker (recomendado)
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) ou Docker Engine com Docker Compose.
-- Portas locais `3000` e `3306` livres, ou ajuste `APP_PORT` no arquivo `.env`.
+**Pré-requisitos**
 
-### Passos
+- [Git](https://git-scm.com/downloads)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) instalado e **aberto**
+- Portas `3000` e `3306` livres no computador
 
-```bash
-# 1. Entre na pasta do projeto.
-cd sgpo
+**Passo a passo**
 
-# 2. Crie o arquivo de configuração local.
-cp env.example .env
+1. Baixe o projeto:
 
-# 3. Edite .env e troque JWT_SECRET por uma chave aleatória de pelo menos 32 caracteres.
-# Exemplo para gerar a chave: openssl rand -hex 32
+   ```bash
+   git clone https://github.com/EduardoFelype/SGPO.git
+   cd SGPO
+   ```
 
-# 4. Inicie a aplicação e o MySQL.
+2. Crie o arquivo de configuração a partir do modelo:
 
-```
+   ```bash
+   # Linux / macOS / Git Bash
+   cp .env.example .env
 
-Abra [http://localhost:3000](http://localhost:3000). No primeiro acesso, o sistema solicitará o nome, usuário e senha do **administrador inicial**. O MySQL e as fotos da OS são preservados nos volumes `mysql_data` e `uploads_data`.
+   # Windows (Prompt de Comando)
+   copy .env.example .env
+   ```
 
-Para encerrar os contêineres, use:
+3. Abra o arquivo `.env` e troque:
+   - `MYSQL_PASSWORD` e `MYSQL_ROOT_PASSWORD` por senhas suas;
+   - `JWT_SECRET` por uma chave aleatória com 32 caracteres ou mais (pode gerar com `openssl rand -hex 32`).
+
+4. Suba o sistema e o banco de dados:
+
+   ```bash
+   docker compose up --build
+   ```
+
+   Na primeira vez demora alguns minutos. Quando aparecer que o servidor está rodando, siga para o próximo passo.
+
+5. Abra no navegador: **http://localhost:3000**
+
+Para desligar:
 
 ```bash
 docker compose down
 ```
 
-> Para apagar também os dados locais de banco e fotos, execute `docker compose down -v`. Esse comando é destrutivo.
+Os dados do banco e as fotos das OS ficam guardados e voltam na próxima vez que o sistema for ligado.
 
-## Executar sem Docker
+> ⚠️ `docker compose down -v` **apaga todos os dados** (banco e fotos). Use apenas se quiser começar do zero.
 
-1. Instale um MySQL 8 e crie um banco de dados vazio.
-2. Copie `env.example` para `.env` e ajuste `DATABASE_URL` para o endereço do seu MySQL, por exemplo: `mysql://usuario:senha@localhost:3306/sgpo`.
-3. Instale e inicie:
+### Opção 2 — Sem Docker (modo desenvolvimento)
 
-```bash
-pnpm install
-pnpm drizzle-kit migrate
-pnpm dev
-```
+**Pré-requisitos**
 
-Para gerar uma conta administrativa via terminal, defina as variáveis `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ADMIN_NAME` e, opcionalmente, `ADMIN_EMAIL`, depois execute:
+- [Node.js 22](https://nodejs.org/) ou mais recente
+- [pnpm](https://pnpm.io/installation) (`npm install -g pnpm`)
+- [MySQL 8](https://dev.mysql.com/downloads/mysql/) instalado e rodando, com um banco vazio (ex.: `sgpo`)
 
-```bash
-pnpm seed:admin
-```
+**Passo a passo**
+
+1. Baixe o projeto e entre na pasta:
+
+   ```bash
+   git clone https://github.com/EduardoFelype/SGPO.git
+   cd SGPO
+   ```
+
+2. Crie o `.env` a partir do modelo (veja o passo 2 da opção 1) e ajuste:
+   - `DATABASE_URL` com o usuário, a senha e o nome do seu banco. Exemplo: `mysql://root:minhasenha@localhost:3306/sgpo`
+   - `JWT_SECRET` com uma chave aleatória de 32 caracteres ou mais.
+
+3. Instale as dependências, crie as tabelas e inicie:
+
+   ```bash
+   pnpm install
+   pnpm drizzle-kit migrate
+   pnpm dev
+   ```
+
+4. Abra no navegador: **http://localhost:3000**
+
+---
+
+## Como usar
+
+### 1. Primeiro acesso
+
+Na primeira vez que o sistema é aberto, ele pede **nome, usuário e senha do administrador**. Depois disso, o acesso é sempre pela tela de login.
+
+### 2. Configure a oficina
+
+Em **Configurações**, preencha nome, CNPJ, telefone e endereço da oficina. Esses dados aparecem nas ordens de serviço impressas.
+
+### 3. Cadastre as peças do estoque
+
+Em **Estoque → Nova peça**, informe código, nome, quantidade, estoque mínimo e preços. Use **Movimentar** para registrar entradas (compras) e saídas.
+
+### 4. Cadastre o cliente e o veículo
+
+- **Clientes → Novo cliente**: informe nome, CPF ou CNPJ, telefone e CEP (o endereço é preenchido sozinho).
+- **Veículos → Novo veículo**: escolha o cliente, informe a placa e selecione **marca, modelo e ano da lista FIPE**.
+
+### 5. Abra uma ordem de serviço
+
+1. Clique em **Nova OS** (no menu ou no Dashboard).
+2. Escolha o cliente e o veículo.
+3. Informe quilometragem, diagnóstico e previsão de entrega.
+4. Adicione os **serviços** (mão de obra) e as **peças** do estoque.
+5. Salve. O número da OS é gerado automaticamente.
+
+Na tela da OS é possível anexar fotos do veículo, imprimir em PDF e enviar ao cliente pelo WhatsApp.
+
+### 6. Acompanhe e conclua a OS
+
+Altere o status conforme o andamento (em análise, aguardando aprovação, aguardando peça, em andamento). Ao marcar como **Concluída**:
+
+- as peças saem do estoque;
+- a receita é lançada no **Financeiro**;
+- a quilometragem do veículo é atualizada.
+
+Uma OS concluída fica bloqueada. Para corrigir algo, use **Reabrir** (as peças voltam ao estoque e a receita é cancelada).
+
+### 7. Controle o financeiro
+
+Em **Financeiro**, registre despesas (aluguel, fornecedores etc.) e outras receitas, e use **Registrar pagamento** quando uma conta for paga ou recebida.
+
+### 8. Veja os resultados
+
+- **Dashboard**: resumo do negócio e alertas de estoque crítico.
+- **Relatórios**: escolha o período e exporte em CSV, Excel ou PDF.
+
+---
+
+## Regras de negócio
+
+| Código | Regra |
+|---|---|
+| RN01 | Só acessa o sistema quem fizer login com usuário e senha válidos. |
+| RN02 | O primeiro usuário é o administrador; só ele pode criar novos usuários. |
+| RN03 | CPF ou CNPJ deve ser válido e não pode estar cadastrado em outro cliente. |
+| RN04 | Telefone com DDD (10 ou 11 dígitos). |
+| RN05 | O endereço é preenchido pelo CEP (ViaCEP). |
+| RN06 | Cliente, veículo ou produto com OS não pode ser excluído (o histórico é mantido). |
+| RN07 | Placa no padrão antigo (ABC1234) ou Mercosul (ABC1D23), sem repetir. |
+| RN08 | Marca, modelo e ano vêm da tabela FIPE; ano entre 1950 e o ano seguinte ao atual. |
+| RN09 | Quilometragem até 2.000.000 km e nunca menor que a da última OS. |
+| RN10 | O veículo da OS precisa ser do cliente escolhido; o número da OS é automático. |
+| RN11 | OS com pelo menos um item com valor; até 50 itens; quantidade de 1 a 999; item até R$ 999.999,99; total até R$ 9.999.999,99. |
+| RN12 | O desconto não pode ser maior que o valor da peça. |
+| RN13 | A previsão de entrega não pode ser antes da abertura nem passar de 365 dias. |
+| RN14 | Só conclui a OS se houver estoque; ao concluir, baixa as peças, gera uma única receita e atualiza a quilometragem. |
+| RN15 | OS concluída ou cancelada não pode ser editada sem antes ser reaberta. |
+| RN16 | Reabrir ou cancelar uma OS concluída devolve as peças e cancela a receita. |
+| RN17 | Até 20 fotos por OS, com até 5 MB cada. |
+| RN18 | Código do produto único; preço de venda maior que zero; quantidades de 0 a 99.999. |
+| RN19 | A saída do estoque não pode ser maior que o disponível; toda alteração gera movimentação. |
+| RN20 | Produto com quantidade igual ou abaixo do mínimo gera alerta de estoque crítico. |
+| RN21 | Lançamento financeiro com valor maior que zero e vencimento em até 10 anos. |
+| RN22 | Lançamentos gerados pela OS não podem ser editados nem excluídos manualmente. |
+| RN23 | Lançamento cancelado não pode ser pago; lançamento pago não pode ser pago de novo. |
+| RN24 | Relatórios só são exportados quando há dados no período. |
+
+---
 
 ## Comandos úteis
 
-| Comando | Finalidade |
+| Comando | Para que serve |
 |---|---|
-| `pnpm dev` | Inicia o servidor em desenvolvimento. |
-| `pnpm check` | Executa a verificação TypeScript. |
-| `pnpm test` | Executa a suíte Vitest. |
-| `pnpm build` | Gera o frontend e o backend de produção. |
-| `pnpm start` | Inicia a versão compilada. |
-| `pnpm drizzle-kit migrate` | Aplica as migrações do banco de dados. |
-| `pnpm seed:admin` | Cria um administrador local a partir das variáveis `ADMIN_*`. |
+| `pnpm dev` | Inicia o sistema em modo desenvolvimento. |
+| `pnpm build` | Gera a versão de produção. |
+| `pnpm start` | Inicia a versão de produção (depois do `build`). |
+| `pnpm test` | Roda os testes automatizados. |
+| `pnpm check` | Verifica erros de TypeScript. |
+| `pnpm drizzle-kit migrate` | Cria ou atualiza as tabelas do banco. |
+| `pnpm seed:admin` | Cria um usuário administrador pelo terminal (usa as variáveis `ADMIN_*` do `.env`). |
 
-## Estrutura principal
+---
+
+## Estrutura do projeto
 
 ```text
-client/src/pages/       Páginas do sistema
-client/src/components/  Componentes e design system
-server/routers/         Procedimentos tRPC por domínio
-server/authLocal.ts     Hash de senha e validações do login local
-server/_core/localSession.ts  Criação e verificação de sessões JWT
-server/storage.ts       Armazenamento local de fotos e suporte opcional a S3
-drizzle/schema.ts       Modelo do banco de dados
-drizzle/*.sql           Migrações MySQL
-compose.yaml            Orquestração Docker + MySQL
-env.example             Modelo de variáveis locais
+client/src/pages/        Telas do sistema (Dashboard, Clientes, Veículos, OS, Estoque, Financeiro...)
+client/src/components/   Componentes reutilizáveis da interface
+server/routers/          Rotas da API por módulo
+server/validation.ts     Validações (CPF, CNPJ, placa, telefone, limites)
+server/fipe.ts           Integração com a tabela FIPE
+shared/limits.ts         Limites de valores e quantidades usados no front e no back
+drizzle/schema.ts        Tabelas do banco de dados
+drizzle/*.sql            Migrações do banco
+docs/diagramas/          Diagramas de casos de uso e de classe
+compose.yaml             Configuração do Docker (sistema + MySQL)
+.env.example             Modelo das configurações
 ```
 
-## Regras de negócio automatizadas
+---
 
-- A conclusão de uma ordem de serviço baixa as peças utilizadas do estoque e registra a movimentação correspondente.
-- A conclusão de uma ordem de serviço gera a receita financeira vinculada.
-- Produtos abaixo ou no estoque mínimo são destacados como alerta no sistema.
-- Senhas não são armazenadas em texto puro: apenas o hash bcrypt é persistido no banco.
+## Documentação (diagramas)
 
-## Identidade visual
+| Diagrama de casos de uso | Diagrama de classe |
+|---|---|
+| ![Diagrama de casos de uso](docs/diagramas/diagrama-casos-de-uso.png) | ![Diagrama de classe](docs/diagramas/diagrama-de-classe.png) |
 
-As logos oficiais fornecidas para o SGPO estão incluídas no projeto e são servidas localmente. A paleta utiliza azul-marinho, laranja e tons metálicos; a interface oferece alternância entre os temas claro e escuro.
+---
+
+## Problemas comuns
+
+| Problema | Solução |
+|---|---|
+| `port is already allocated` ao subir o Docker | A porta 3000 ou 3306 já está em uso. Feche o outro programa ou mude `APP_PORT` no `.env`. |
+| Tela de login não aceita a senha | Confira usuário e senha. Se perdeu o acesso, crie outro administrador com `pnpm seed:admin`. |
+| A lista de marcas ou modelos FIPE não carrega | Verifique a internet. O sistema busca na BrasilAPI e, se ela falhar, na API Parallelum. Se as duas estiverem fora do ar, aparece uma lista básica de marcas e é possível digitar o modelo. |
+| Erro de conexão com o banco (sem Docker) | Confira se o MySQL está ligado e se `DATABASE_URL` no `.env` está correto. |
+
+---
+
+Projeto desenvolvido para a disciplina de Projeto Integrado — Engenharia de Software, UNICEPLAC (2026).
